@@ -1,5 +1,7 @@
 # SRJ Billing
 
+Billing software for a jewellery store.
+
 Offline desktop billing for jewellers (Tauri v2 + React + TypeScript + SQLite). See `PLAN.md` for the spec. Phase 1 is built.
 
 ## Develop (Mac)
