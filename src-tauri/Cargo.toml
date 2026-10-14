@@ -1,0 +1,27 @@
+[package]
+name = "srj-billing"
+version = "0.1.0"
+description = "Offline billing for jewellers"
+edition = "2021"
+
+[lib]
+name = "srj_billing_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.0", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.0", features = [] }
+tauri-plugin-dialog = "=2.8.0"
+tauri-plugin-opener = "=2.6.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
+base64 = "0.23.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
