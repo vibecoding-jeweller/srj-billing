@@ -7,7 +7,8 @@ import boldItalicUrl from '../assets/fonts/LiberationSans-BoldItalic.ttf?url';
 import italicUrl from '../assets/fonts/LiberationSans-Italic.ttf?url';
 import rupeeUrl from '../assets/fonts/DejaVuSans-Bold.ttf?url';
 import { renderBillPdf, type PdfAssets } from './pdf';
-import type { BillDoc, CopyKind } from './types';
+import { renderEstimatePdf } from './estimatePdf';
+import type { BillDoc, CopyKind, EstimateDoc } from './types';
 import { financialYear, invoiceFileStem, monthFolder } from './fy';
 import { fileExists, openPath, printWindow, writeFile } from './api';
 
@@ -43,6 +44,34 @@ export async function makePdf(doc: BillDoc, copy: CopyKind, logoDataUrl: string)
 export function joinPath(base: string, ...parts: string[]): string {
   const sep = base.includes('\\') ? '\\' : '/';
   return [base.replace(/[\\/]+$/, ''), ...parts].join(sep);
+}
+
+export async function makeEstimatePdf(doc: EstimateDoc, logoDataUrl: string): Promise<Uint8Array> {
+  return renderEstimatePdf(doc, { ...(await fonts()), logo: dataUrlToBytes(logoDataUrl) });
+}
+
+/** {Bills folder}/Estimates/{FY}/{MM-Mon}/EST-26-27-001.pdf */
+export function estimatePath(billsFolder: string, estimateNo: string, date: string): string {
+  return joinPath(billsFolder, 'Estimates', financialYear(date), monthFolder(date), `${invoiceFileStem(estimateNo)}.pdf`);
+}
+
+export async function saveEstimatePdf(doc: EstimateDoc, logo: string, billsFolder: string) {
+  const bytes = await makeEstimatePdf(doc, logo);
+  const path = estimatePath(billsFolder, doc.estimateNo, doc.date);
+  await writeFile(path, bytes);
+  return { path, bytes };
+}
+
+/** Open an estimate's PDF, re-creating it if lost; cancelled ones open as a stamped copy. */
+export async function openEstimate(doc: EstimateDoc, logo: string, billsFolder: string) {
+  const path = estimatePath(billsFolder, doc.estimateNo, doc.date);
+  if (doc.cancelled) {
+    const stamped = path.replace(/\.pdf$/, '_CANCELLED.pdf');
+    await writeFile(stamped, await makeEstimatePdf(doc, logo));
+    return openPath(stamped);
+  }
+  if (!(await fileExists(path))) await writeFile(path, await makeEstimatePdf(doc, logo));
+  return openPath(path);
 }
 
 /** {Bills folder}/{FY}/{MM-Mon}/SR-26-27-001_customer.pdf */

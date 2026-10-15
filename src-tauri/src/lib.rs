@@ -47,6 +47,22 @@ fn cancel_invoice(state: State<AppState>, id: i64, reason: String) -> CmdResult<
 }
 
 #[tauri::command]
+fn save_estimate(state: State<AppState>, estimate: db::NewEstimate) -> CmdResult<db::SavedEstimate> {
+    let mut conn = state.conn.lock().map_err(err)?;
+    db::save_estimate(&mut conn, &estimate).map_err(err)
+}
+
+#[tauri::command]
+fn cancel_estimate(state: State<AppState>, id: i64, reason: String) -> CmdResult<usize> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("A reason is required to cancel an estimate".into());
+    }
+    let conn = state.conn.lock().map_err(err)?;
+    db::cancel_estimate(&conn, id, reason).map_err(err)
+}
+
+#[tauri::command]
 fn write_file(path: String, data_b64: String) -> CmdResult<()> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64).map_err(err)?;
     let p = PathBuf::from(&path);
@@ -173,6 +189,8 @@ pub fn run() {
             db_execute,
             save_invoice,
             cancel_invoice,
+            save_estimate,
+            cancel_estimate,
             write_file,
             file_exists,
             default_bills_folder,

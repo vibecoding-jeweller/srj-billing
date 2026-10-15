@@ -1,0 +1,291 @@
+// Estimate receipt for customers who don't want a GST bill. No GST, own number series (EST/26-27/001),
+// saved and listed in Old Bills so every sale is tracked.
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { calcEstimate, PAYMENT_MODES, type PaymentMode } from '../lib/calc';
+import { fmtMoney, fmtRoundOff, fmtWeight } from '../lib/money';
+import { buildEstimateDoc, shopSnapshot } from '../lib/bill';
+import { CASH_BLOCK_MSG, isCashBlocked } from '../lib/validate';
+import { financialYear, todayISO } from '../lib/fy';
+import { backupNow, findCustomer, openPath, saveEstimate, sha256Hex, type NewEstimatePayload } from '../lib/api';
+import { printPdf, saveEstimatePdf } from '../lib/output';
+import { focusNextOnEnter } from '../lib/keys';
+import { Modal } from '../components/Modal';
+import { ItemsEditor, parseRows, useItemRows } from '../components/ItemsEditor';
+import type { DailyRates, EstimateCustomer, EstimateDoc, Settings } from '../lib/types';
+
+const emptyCustomer = (): EstimateCustomer => ({ name: '', mobile: '', otherMobile: '' });
+
+interface Done {
+  doc: EstimateDoc;
+  pdf: Uint8Array | null;
+  path: string;
+  problem: string;
+}
+
+export function Estimate({
+  settings,
+  rates,
+  active,
+  suggestions,
+  onSaved,
+}: {
+  settings: Settings;
+  rates: DailyRates | null;
+  active: boolean;
+  suggestions: string[];
+  onSaved: () => void;
+}) {
+  const [customer, setCustomer] = useState<EstimateCustomer>(emptyCustomer);
+  const [repeat, setRepeat] = useState(false);
+  const items = useItemRows(settings.hsn);
+  const [mode, setMode] = useState<PaymentMode>('Cash');
+  const [showErrors, setShowErrors] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState<Done | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+
+  const { parsed, validItems, itemErrors, itemCount } = parseRows(items.rows, rates, settings.hsn);
+  const est = useMemo(() => calcEstimate(validItems), [JSON.stringify(validItems)]);
+  const cashBlocked = mode === 'Cash' && isCashBlocked([{ mode, amount: est.grand }]);
+  const errors = [
+    ...itemErrors,
+    ...(itemCount === 0 ? ['Add at least one item.'] : []),
+    ...(customer.mobile && !/^\d{10}$/.test(customer.mobile) ? ['Mobile number must be 10 digits.'] : []),
+    ...(customer.otherMobile && !/^\d{10}$/.test(customer.otherMobile) ? ['Other mobile number must be 10 digits.'] : []),
+    ...(cashBlocked ? [CASH_BLOCK_MSG] : []),
+  ];
+
+  // Repeat customer: fill the name from the mobile number
+  useEffect(() => {
+    if (!/^\d{10}$/.test(customer.mobile)) {
+      setRepeat(false);
+      return;
+    }
+    let stale = false;
+    findCustomer(customer.mobile).then((c) => {
+      if (stale || !c) return;
+      setCustomer((x) => ({ ...x, name: x.name.trim() ? x.name : c.name === 'Cash' ? '' : c.name }));
+      setRepeat(true);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [customer.mobile]);
+
+  // Opening this tab puts the cursor in the mobile number box, unless something in the form already has it.
+  useEffect(() => {
+    if (!active) return;
+    const t = setTimeout(() => {
+      if (!formRef.current?.contains(document.activeElement)) formRef.current?.querySelector<HTMLInputElement>('[data-first]')?.focus();
+    }, 0);
+    return () => clearTimeout(t);
+  }, [active]);
+
+  const saveRef = useRef<() => void>(() => {});
+  saveRef.current = () => void save();
+  useEffect(() => {
+    if (!active || done) return;
+    const h = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        saveRef.current();
+      } else if (mod && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        items.addRow();
+      }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [active, done]);
+
+  const reset = () => {
+    setCustomer(emptyCustomer());
+    setRepeat(false);
+    items.reset();
+    setMode('Cash');
+    setShowErrors(false);
+  };
+
+  async function save() {
+    if (saving) return;
+    setShowErrors(true);
+    if (errors.length) return;
+    setSaving(true);
+    try {
+      const date = todayISO();
+      const fy = financialYear(date);
+      const logoHash = settings.logo ? (await sha256Hex(settings.logo)).slice(0, 16) : '';
+      const doc = buildEstimateDoc({ estimateNo: '', date, shop: shopSnapshot(settings, logoHash), customer, items: validItems, paymentMode: mode });
+      const payload: NewEstimatePayload = {
+        date,
+        fy,
+        prefix: (settings.estimatePrefix || 'EST').trim() || 'EST',
+        customer: doc.customer.mobile ? { mobile: doc.customer.mobile, name: customer.name.trim() } : null,
+        customer_snapshot: doc.customer,
+        shop_snapshot: doc.shop,
+        logo: settings.logo ? { hash: logoHash, data_url: settings.logo } : null,
+        subtotal: doc.subtotal,
+        round_off: doc.roundOff,
+        grand_total: doc.grand,
+        payment_mode: doc.paymentMode,
+        items: doc.items.map((it) => ({
+          description: it.description,
+          metal: it.metal,
+          weight_mg: it.weightMg,
+          rate_input: it.rateInput,
+          rate_per_g: it.ratePerG,
+          metal_value: it.metalValue,
+          making_type: it.makingType,
+          making_value: it.makingValue,
+          making_amount: it.makingAmount,
+        })),
+      };
+      const saved = await saveEstimate(payload);
+      doc.estimateNo = saved.estimate_no;
+      reset();
+      onSaved();
+
+      const result: Done = { doc, pdf: null, path: '', problem: '' };
+      try {
+        const out = await saveEstimatePdf(doc, settings.logo, settings.billsFolder);
+        result.pdf = out.bytes;
+        result.path = out.path;
+      } catch (e) {
+        result.problem = `The PDF could not be saved (${e}). Check the Bills folder in Settings, then reprint from Old Bills.`;
+      }
+      setDone(result);
+      backupNow().catch(() => {});
+      if (result.pdf) await printPdf(result.pdf).catch((e) => setDone({ ...result, problem: `Printing failed: ${e}` }));
+    } catch (e) {
+      alert(`The estimate was NOT saved: ${e}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const finishDone = () => {
+    setDone(null);
+    setTimeout(() => formRef.current?.querySelector<HTMLInputElement>('[data-first]')?.focus(), 0);
+  };
+
+  const setC = (k: keyof EstimateCustomer, v: string) => setCustomer((c) => ({ ...c, [k]: v }));
+  const digits = (v: string) => v.replace(/\D/g, '').slice(0, 10);
+
+  return (
+    <form ref={formRef} className="bill" onKeyDown={(e) => focusNextOnEnter(e)} onSubmit={(e) => e.preventDefault()} autoComplete="off">
+      <div className="bill-main">
+        <div className="alert estimate-note">Estimate · no GST · not a tax invoice. Numbered separately ({(settings.estimatePrefix || 'EST') + '/' + financialYear(todayISO()) + '/…'}).</div>
+        <section className="card stack">
+          <h3>Customer</h3>
+          <div className="row">
+            <label className="field" style={{ width: 220 }}>
+              Mobile number
+              <input data-nav data-first inputMode="numeric" maxLength={10} value={customer.mobile} onChange={(e) => setC('mobile', digits(e.target.value))} placeholder="10 digits" />
+            </label>
+            <label className="field grow">
+              Name
+              <input data-nav value={customer.name} onChange={(e) => setC('name', e.target.value)} placeholder="Leave empty for “Cash”" />
+            </label>
+            <label className="field" style={{ width: 220 }}>
+              <span>
+                Other mobile <span className="hint">(optional)</span>
+              </span>
+              <input data-nav inputMode="numeric" maxLength={10} value={customer.otherMobile} onChange={(e) => setC('otherMobile', digits(e.target.value))} />
+            </label>
+          </div>
+          {repeat && <div className="repeat">Repeat customer ✓</div>}
+        </section>
+
+        <ItemsEditor
+          parsed={parsed}
+          rates={rates}
+          showErrors={showErrors}
+          showHsn={false}
+          defaultHsn={settings.hsn}
+          suggestions={suggestions}
+          setRow={items.setRow}
+          addRow={items.addRow}
+          removeRow={items.removeRow}
+          onLastEnter={() => formRef.current?.querySelector<HTMLElement>('[data-pay]')?.focus()}
+        />
+
+        <section className="card stack">
+          <h3>Payment</h3>
+          <div className="row">
+            <label className="field" style={{ width: 180 }}>
+              Payment mode
+              <select data-nav data-pay value={mode} onChange={(e) => setMode(e.target.value as PaymentMode)}>
+                {PAYMENT_MODES.map((m) => (
+                  <option key={m}>{m}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {cashBlocked && <div className="alert error">{CASH_BLOCK_MSG}</div>}
+        </section>
+      </div>
+
+      <aside className="summary">
+        <section className="card stack">
+          <h3>Estimate summary</h3>
+          <div className="lines">
+            <span>Total weight</span>
+            <span className="num">{fmtWeight(est.totalWeightMg)} g</span>
+            <span>Items total</span>
+            <span className="num">₹{fmtMoney(est.subtotal)}</span>
+            <span>Round off</span>
+            <span className="num">{fmtRoundOff(est.roundOff)}</span>
+          </div>
+          <div className="grand">
+            <strong>Total</strong>
+            <span className="num">₹{fmtMoney(est.grand)}</span>
+          </div>
+          <div className="hint">No GST on estimates.</div>
+        </section>
+        {showErrors && errors.length > 0 && (
+          <div className="alert error">
+            <ul>
+              {errors.map((e) => (
+                <li key={e}>{e}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <button type="button" className="btn primary big" disabled={saving || cashBlocked} onClick={() => save()}>
+          {saving ? 'Saving…' : 'Save & Print Estimate'}
+          <div className="hint" style={{ color: 'inherit', opacity: 0.85 }}>
+            Ctrl+P
+          </div>
+        </button>
+        <button type="button" className="link" style={{ alignSelf: 'center' }} onClick={() => confirm('Clear this estimate and start again?') && reset()}>
+          Clear form
+        </button>
+      </aside>
+
+      {done && (
+        <Modal title={`Estimate ${done.doc.estimateNo} saved`} onClose={finishDone}>
+          <div>
+            Total <b>₹{fmtMoney(done.doc.grand)}</b> · {done.doc.customer.name}
+          </div>
+          {done.problem ? <div className="alert error">{done.problem}</div> : <div className="hint">Saved to {done.path}</div>}
+          <div className="actions">
+            {done.pdf && (
+              <>
+                <button type="button" className="btn" onClick={() => openPath(done.path)}>
+                  Open PDF
+                </button>
+                <button type="button" className="btn" onClick={() => printPdf(done.pdf!)}>
+                  Print again
+                </button>
+              </>
+            )}
+            <button type="button" className="btn primary" autoFocus onClick={finishDone}>
+              New estimate
+            </button>
+          </div>
+        </Modal>
+      )}
+    </form>
+  );
+}

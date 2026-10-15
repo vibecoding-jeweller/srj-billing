@@ -1,19 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  calcBill,
-  calcItem,
-  METAL_LABEL,
-  needsReference,
-  PAYMENT_MODES,
-  RATE_UNIT_LABEL,
-  sumPayments,
-  type ItemInput,
-  type MakingType,
-  type Metal,
-  type Payment,
-  type PaymentMode,
-} from '../lib/calc';
-import { fmtMoney, fmtPct, fmtRoundOff, fmtWeight, paiseToInput, parseMg, parsePaise, parseScaled } from '../lib/money';
+import { calcBill, needsReference, PAYMENT_MODES, sumPayments, type Payment, type PaymentMode } from '../lib/calc';
+import { fmtMoney, fmtPct, fmtRoundOff, fmtWeight, paiseToInput, parsePaise } from '../lib/money';
 import { buildBillDoc, shopSnapshot } from '../lib/bill';
 import { CASH_BLOCK_MSG, checkBill, isCashBlocked, panRequired } from '../lib/validate';
 import { STATES, stateCode } from '../lib/states';
@@ -22,34 +9,8 @@ import { backupNow, findCustomer, saveInvoice, sha256Hex, openPath, type NewInvo
 import { printPdf, saveBillPdfs } from '../lib/output';
 import { focusNextOnEnter } from '../lib/keys';
 import { Modal } from '../components/Modal';
+import { ItemsEditor, newKey, parseRows, useItemRows } from '../components/ItemsEditor';
 import type { BillDoc, Buyer, DailyRates, Relation, Settings } from '../lib/types';
-
-const SUGGESTIONS = [
-  'Gold Ring', 'Gold Chain', 'Gold Earrings', 'Gold Tops', 'Gold Bangles', 'Gold Kada', 'Gold Pendant', 'Gold Mangalsutra',
-  'Gold Necklace', 'Gold Nose Pin', 'Gold Locket', 'Silver Payal', 'Silver Bichhiya', 'Silver Chain', 'Silver Ring',
-  'Silver Coin', 'Silver Glass', 'Silver Kada',
-];
-
-const HSN_SUGGESTIONS: [string, string][] = [
-  ['7113', 'Jewellery of gold / silver'],
-  ['7114', "Goldsmiths' / silversmiths' wares (utensils, articles)"],
-  ['7117', 'Imitation jewellery'],
-  ['7118', 'Coins'],
-  ['7108', 'Gold, unwrought / bars'],
-  ['7106', 'Silver, unwrought / bars'],
-];
-
-interface RowState {
-  key: number;
-  desc: string;
-  metal: Metal;
-  weight: string;
-  /** null = use today's rate */
-  rate: string | null;
-  makingType: MakingType;
-  making: string;
-  hsn: string;
-}
 
 interface SplitRow {
   key: number;
@@ -58,9 +19,6 @@ interface SplitRow {
   amount: string | null;
   ref: string;
 }
-
-let nextKey = 1;
-const newRow = (hsn: string): RowState => ({ key: nextKey++, desc: '', metal: 'GOLD22', weight: '', rate: null, makingType: 'PCT', making: '', hsn });
 
 const emptyBuyer = (s: Settings): Buyer => ({
   mobile: '',
@@ -81,41 +39,32 @@ interface Done {
   problem: string;
 }
 
-export function NewBill({ settings, rates, active }: { settings: Settings; rates: DailyRates | null; active: boolean }) {
+export function NewBill({
+  settings,
+  rates,
+  active,
+  suggestions,
+  onSaved,
+}: {
+  settings: Settings;
+  rates: DailyRates | null;
+  active: boolean;
+  suggestions: string[];
+  onSaved: () => void;
+}) {
   const [buyer, setBuyer] = useState<Buyer>(() => emptyBuyer(settings));
   const [repeat, setRepeat] = useState(false);
-  const [rows, setRows] = useState<RowState[]>(() => [newRow(settings.hsn)]);
+  const items = useItemRows(settings.hsn);
   const [mode, setMode] = useState<PaymentMode>('Cash');
   const [ref, setRef] = useState('');
   const [split, setSplit] = useState<SplitRow[] | null>(null);
   const [showErrors, setShowErrors] = useState(false);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<Done | null>(null);
-  const [focusKey, setFocusKey] = useState<number | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
-  const todayRate = (m: Metal): number | null => (rates ? (m === 'SILVER' ? rates.silver : m === 'GOLD18' ? rates.gold18 : rates.gold22) : null);
-
   // ---------- derive ----------
-  const parsed = rows.map((r, i) => {
-    const blank = !r.desc.trim() && !r.weight.trim();
-    const weightMg = parseMg(r.weight);
-    const rate = r.rate != null ? parsePaise(r.rate) : todayRate(r.metal);
-    const makingValue = r.making.trim() === '' ? 0 : r.makingType === 'PCT' ? parseScaled(r.making, 2) : parsePaise(r.making);
-    const errs: string[] = [];
-    if (!blank) {
-      if (!weightMg) errs.push(`Item ${i + 1}: enter the weight in grams (up to 3 decimals).`);
-      if (!rate) errs.push(`Item ${i + 1}: enter the rate.`);
-      if (makingValue == null) errs.push(`Item ${i + 1}: making charge is not a valid number.`);
-    }
-    const input: ItemInput | null =
-      !blank && errs.length === 0
-        ? { description: r.desc, metal: r.metal, weightMg: weightMg!, rateInput: rate!, makingType: r.makingType, makingValue: makingValue!, hsn: r.hsn.trim() || settings.hsn }
-        : null;
-    return { row: r, blank, errs, input, calc: input ? calcItem(input) : null };
-  });
-  const validItems = parsed.flatMap((p) => (p.input ? [p.input] : []));
-  const itemErrors = parsed.flatMap((p) => p.errs);
+  const { parsed, validItems, itemErrors, itemCount } = parseRows(items.rows, rates, settings.hsn);
   const bill = useMemo(() => calcBill(validItems, settings.gstRate), [JSON.stringify(validItems), settings.gstRate]);
 
   const payments: Payment[] = split
@@ -130,7 +79,7 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
   const panNeeded = panRequired(bill.grand);
   const errors = checkBill({
     grand: bill.grand,
-    itemCount: validItems.length + parsed.filter((p) => !p.blank && !p.input).length,
+    itemCount,
     itemErrors,
     payments,
     pan: buyer.pan,
@@ -139,12 +88,6 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
   });
 
   // ---------- effects ----------
-  useEffect(() => {
-    if (focusKey == null) return;
-    formRef.current?.querySelector<HTMLInputElement>(`[data-desc="${focusKey}"]`)?.focus();
-    setFocusKey(null);
-  }, [focusKey]);
-
   // Customer lookup on 10 digits
   useEffect(() => {
     if (!/^\d{10}$/.test(buyer.mobile)) {
@@ -163,6 +106,15 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
   }, [buyer.mobile, settings.state, settings.stateCode]);
 
   // Keyboard shortcuts
+  // Opening this tab puts the cursor in the mobile number box, unless something in the form already has it.
+  useEffect(() => {
+    if (!active) return;
+    const t = setTimeout(() => {
+      if (!formRef.current?.contains(document.activeElement)) formRef.current?.querySelector<HTMLInputElement>('[data-first]')?.focus();
+    }, 0);
+    return () => clearTimeout(t);
+  }, [active]);
+
   const saveRef = useRef<() => void>(() => {});
   saveRef.current = () => void save();
   useEffect(() => {
@@ -174,7 +126,7 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
         saveRef.current();
       } else if (mod && e.key.toLowerCase() === 'i') {
         e.preventDefault();
-        addRow();
+        items.addRow();
       }
     };
     window.addEventListener('keydown', h);
@@ -183,22 +135,14 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
 
   // ---------- actions ----------
   const setB = <K extends keyof Buyer>(k: K, v: Buyer[K]) => setBuyer((b) => ({ ...b, [k]: v }));
-  const setRow = (key: number, patch: Partial<RowState>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  function addRow() {
-    const r = newRow(settings.hsn);
-    setRows((rs) => [...rs, r]);
-    setFocusKey(r.key);
-  }
-  const removeRow = (key: number) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow(settings.hsn)]));
-
   const startSplit = () => setSplit([
-    { key: nextKey++, mode, amount: '', ref },
-    { key: nextKey++, mode: mode === 'Cash' ? 'UPI' : 'Cash', amount: null, ref: '' },
+    { key: newKey(), mode, amount: '', ref },
+    { key: newKey(), mode: mode === 'Cash' ? 'UPI' : 'Cash', amount: null, ref: '' },
   ]);
   const addSplit = () =>
     setSplit((sp) => [
       ...(sp ?? []).map((s, i) => (s.amount == null ? { ...s, amount: paiseToInput(payments[i].amount) } : s)),
-      { key: nextKey++, mode: 'Cash', amount: null, ref: '' },
+      { key: newKey(), mode: 'Cash', amount: null, ref: '' },
     ]);
   const setSplitRow = (key: number, patch: Partial<SplitRow>) => setSplit((sp) => sp!.map((s) => (s.key === key ? { ...s, ...patch } : s)));
   const removeSplit = (key: number) =>
@@ -217,7 +161,7 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
   const reset = () => {
     setBuyer(emptyBuyer(settings));
     setRepeat(false);
-    setRows([newRow(settings.hsn)]);
+    items.reset();
     setMode('Cash');
     setRef('');
     setSplit(null);
@@ -269,6 +213,7 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
       const saved = await saveInvoice(payload);
       doc.invoiceNo = saved.invoice_no;
       reset();
+      onSaved();
 
       // The bill is saved. Everything below is output; failures are reported but never lose the bill.
       const result: Done = { doc, pdf: null, path: '', problem: '' };
@@ -381,135 +326,18 @@ export function NewBill({ settings, rates, active }: { settings: Settings; rates
           </div>
         </section>
 
-        <section className="card">
-          <h3>Items</h3>
-          <table className="items">
-            <thead>
-              <tr>
-                <th>Description</th>
-                <th style={{ width: 80 }} title="Press Tab to reach this box">
-                  HSN
-                </th>
-                <th style={{ width: 130 }}>Metal</th>
-                <th style={{ width: 110 }}>Weight (g)</th>
-                <th style={{ width: 130 }}>Rate (₹)</th>
-                <th style={{ width: 190 }}>Making</th>
-                <th style={{ width: 120, textAlign: 'right' }}>Amount</th>
-                <th style={{ width: 28 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {parsed.map(({ row: r, calc, blank }, idx) => {
-                const isLast = idx === parsed.length - 1;
-                return (
-                  <tr key={r.key}>
-                    <td>
-                      <input data-nav data-desc={r.key} list="desc-suggestions" value={r.desc} onChange={(e) => setRow(r.key, { desc: e.target.value })} placeholder="e.g. Gold Ring" />
-                    </td>
-                    <td>
-                      {/* Not on the Enter path: the default is right for most items; Tab or click to change it */}
-                      <input list="hsn-suggestions" inputMode="numeric" maxLength={8} value={r.hsn} onChange={(e) => setRow(r.key, { hsn: e.target.value.replace(/[^0-9]/g, '') })} placeholder={settings.hsn} />
-                    </td>
-                    <td>
-                      <select data-nav value={r.metal} onChange={(e) => setRow(r.key, { metal: e.target.value as Metal, rate: null })}>
-                        {(Object.keys(METAL_LABEL) as Metal[]).map((m) => (
-                          <option key={m} value={m}>
-                            {METAL_LABEL[m]}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td>
-                      <input
-                        data-nav
-                        className={'num' + (showErrors && !blank && !parseMg(r.weight) ? ' invalid' : '')}
-                        inputMode="decimal"
-                        value={r.weight}
-                        onChange={(e) => setRow(r.key, { weight: e.target.value })}
-                        onBlur={() => {
-                          const mg = parseMg(r.weight);
-                          if (mg) setRow(r.key, { weight: fmtWeight(mg) });
-                        }}
-                        placeholder="0.000"
-                      />
-                    </td>
-                    <td>
-                      <input
-                        data-nav
-                        className={'num' + (showErrors && !blank && !(r.rate != null ? parsePaise(r.rate) : todayRate(r.metal)) ? ' invalid' : '')}
-                        inputMode="decimal"
-                        value={r.rate ?? paiseToInput(todayRate(r.metal))}
-                        onChange={(e) => setRow(r.key, { rate: e.target.value })}
-                        title={`${METAL_LABEL[r.metal]} rate ${RATE_UNIT_LABEL[r.metal]}`}
-                      />
-                      <div className="sub">
-                        {RATE_UNIT_LABEL[r.metal]}
-                        {r.rate != null && (
-                          <>
-                            {' · '}
-                            <button type="button" className="link" style={{ fontSize: 'inherit', padding: 0 }} onClick={() => setRow(r.key, { rate: null })}>
-                              use today's
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="making">
-                        <select data-nav value={r.makingType} onChange={(e) => setRow(r.key, { makingType: e.target.value as MakingType })}>
-                          <option value="PCT">%</option>
-                          <option value="PER_G">₹/g</option>
-                          <option value="FIXED">₹ fixed</option>
-                        </select>
-                        <input
-                          data-nav
-                          className="num"
-                          inputMode="decimal"
-                          value={r.making}
-                          onChange={(e) => setRow(r.key, { making: e.target.value })}
-                          placeholder={r.makingType === 'PCT' ? '%' : '₹'}
-                          onKeyDown={(e) => {
-                            // Enter on the last item's making goes on to payment
-                            if (e.key === 'Enter' && isLast) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              formRef.current?.querySelector<HTMLElement>('[data-pay]')?.focus();
-                            }
-                          }}
-                        />
-                      </div>
-                      {calc && calc.makingAmount > 0 && (
-                        <div className="sub">
-                          making ₹{fmtMoney(calc.makingAmount)}
-                          {r.makingType === 'PCT' ? ` (${fmtPct(calc.makingValue)}%)` : ''}
-                        </div>
-                      )}
-                    </td>
-                    <td className="amount">{calc ? fmtMoney(calc.metalValue + calc.makingAmount) : '—'}</td>
-                    <td>
-                      <button type="button" className="rm" title="Remove item" tabIndex={-1} onClick={() => removeRow(r.key)}>
-                        ×
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <datalist id="hsn-suggestions">
-            {HSN_SUGGESTIONS.map(([code, label]) => (
-              <option key={code} value={code} label={label} />
-            ))}
-          </datalist>
-          <datalist id="desc-suggestions">
-            {SUGGESTIONS.map((s) => (
-              <option key={s} value={s} />
-            ))}
-          </datalist>
-          <button type="button" className="link" onClick={addRow}>
-            + Add item <span className="hint">(Ctrl+I)</span>
-          </button>
-        </section>
+        <ItemsEditor
+          parsed={parsed}
+          rates={rates}
+          showErrors={showErrors}
+          showHsn
+          defaultHsn={settings.hsn}
+          suggestions={suggestions}
+          setRow={items.setRow}
+          addRow={items.addRow}
+          removeRow={items.removeRow}
+          onLastEnter={() => formRef.current?.querySelector<HTMLElement>('[data-pay]')?.focus()}
+        />
 
         <section className="card stack">
           <h3>Payment</h3>

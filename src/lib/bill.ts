@@ -1,5 +1,5 @@
-import { calcBill, type ItemInput, type Metal } from './calc';
-import type { BillDoc, BillPayment, Buyer, Settings, ShopSnapshot } from './types';
+import { calcBill, calcEstimate, type ItemInput, type Metal, type PaymentMode } from './calc';
+import type { BillDoc, BillPayment, Buyer, EstimateCustomer, EstimateDoc, Settings, ShopSnapshot } from './types';
 
 export const DEFAULT_SETTINGS: Settings = {
   shopName: 'S.R. Jewellers',
@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: Settings = {
   bankAccount: '259760012801',
   bankBranchIfsc: 'D.M. Road, Bsr & INDB0002099',
   invoicePrefix: 'SR',
+  estimatePrefix: 'EST',
   invoiceStart: null,
   gstRate: 300,
   hsn: '7113',
@@ -96,5 +97,33 @@ export function buildBillDoc(args: {
     roundOff: c.roundOff,
     grand: c.grand,
     payments: args.payments,
+  };
+}
+
+export function buildEstimateDoc(args: {
+  estimateNo: string;
+  date: string;
+  shop: ShopSnapshot;
+  customer: EstimateCustomer;
+  items: ItemInput[];
+  paymentMode: PaymentMode;
+}): EstimateDoc {
+  const items = args.items.map((it) => ({ ...it, description: printedDescription(it.description, it.metal), hsn: '' }));
+  const c = calcEstimate(items);
+  return {
+    estimateNo: args.estimateNo,
+    date: args.date,
+    shop: args.shop,
+    customer: {
+      name: args.customer.name.trim() || 'Cash',
+      mobile: args.customer.mobile.trim(),
+      otherMobile: args.customer.otherMobile.trim(),
+    },
+    items: c.items,
+    totalWeightMg: c.totalWeightMg,
+    subtotal: c.subtotal,
+    roundOff: c.roundOff,
+    grand: c.grand,
+    paymentMode: args.paymentMode,
   };
 }

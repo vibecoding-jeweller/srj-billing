@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getLatestRates, getRates, loadSettings, saveSettings, setRates } from './lib/api';
+import { getLatestRates, getRates, loadSettings, pastDescriptions, saveSettings, setRates } from './lib/api';
+import { BASE_DESCRIPTIONS, uniqueDescriptions } from './lib/search';
 import { todayISO } from './lib/fy';
 import { fmtMoneyShort } from './lib/money';
 import type { DailyRates, Settings } from './lib/types';
 import { RatesModal } from './components/RatesModal';
 import { NewBill } from './screens/NewBill';
+import { Estimate } from './screens/Estimate';
 import { OldBills } from './screens/OldBills';
 import { SettingsScreen } from './screens/Settings';
 
-type Screen = 'new' | 'old' | 'settings';
+type Screen = 'new' | 'estimate' | 'old' | 'settings';
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('new');
@@ -18,6 +20,15 @@ export default function App() {
   const [lastRates, setLastRates] = useState<DailyRates | null>(null);
   const [ratesOpen, setRatesOpen] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [suggestions, setSuggestions] = useState<string[]>(BASE_DESCRIPTIONS);
+
+  // Description search offers common goods plus everything typed on earlier bills and estimates.
+  const refreshSuggestions = useCallback(() => {
+    pastDescriptions()
+      .then((past) => setSuggestions(uniqueDescriptions(BASE_DESCRIPTIONS, past)))
+      .catch(() => {});
+  }, []);
+  useEffect(refreshSuggestions, [refreshSuggestions]);
 
   const refreshRates = useCallback(async (date: string, askIfMissing: boolean) => {
     const r = await getRates(date);
@@ -54,7 +65,10 @@ export default function App() {
   // After the rates popup, put the cursor back on the bill so typing can start straight away.
   const closeRates = () => {
     setRatesOpen(false);
-    setTimeout(() => document.querySelector<HTMLInputElement>('[data-first]')?.focus(), 0);
+    setTimeout(() => {
+      const visible = Array.from(document.querySelectorAll<HTMLInputElement>('[data-first]')).find((el) => el.offsetParent !== null);
+      visible?.focus();
+    }, 0);
   };
 
   const updateSettings = async (s: Settings) => {
@@ -81,6 +95,9 @@ export default function App() {
           <button className={'tab' + (screen === 'new' ? ' active' : '')} onClick={() => setScreen('new')}>
             New Bill
           </button>
+          <button className={'tab' + (screen === 'estimate' ? ' active' : '')} onClick={() => setScreen('estimate')}>
+            Estimate
+          </button>
           <button className={'tab' + (screen === 'old' ? ' active' : '')} onClick={() => setScreen('old')}>
             Old Bills
           </button>
@@ -95,9 +112,12 @@ export default function App() {
         </div>
       </header>
       <main className="content">
-        {/* New Bill stays mounted so a half-filled bill survives a look at Old Bills */}
+        {/* New Bill and Estimate stay mounted so a half-filled form survives a look at another tab */}
         <div style={{ display: screen === 'new' ? 'block' : 'none' }}>
-          <NewBill settings={settings} rates={rates} active={screen === 'new'} />
+          <NewBill settings={settings} rates={rates} active={screen === 'new'} suggestions={suggestions} onSaved={refreshSuggestions} />
+        </div>
+        <div style={{ display: screen === 'estimate' ? 'block' : 'none' }}>
+          <Estimate settings={settings} rates={rates} active={screen === 'estimate'} suggestions={suggestions} onSaved={refreshSuggestions} />
         </div>
         {screen === 'old' && <OldBills settings={settings} />}
         {screen === 'settings' && <SettingsScreen settings={settings} onSave={updateSettings} />}

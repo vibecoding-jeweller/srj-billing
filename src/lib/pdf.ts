@@ -24,17 +24,17 @@ const COPY_LABEL: Record<CopyKind, string> = {
   store: 'DUPLICATE FOR SUPPLIER',
 };
 
-const W = 595.2755905511812;
-const H = 841.8897637795277;
-const L = 40;
-const R = W - 40;
+export const W = 595.2755905511812;
+export const H = 841.8897637795277;
+export const L = 40;
+export const R = W - 40;
 const BLACK = rgb(0, 0, 0);
 /** Declaration wrap width; matches the line breaks in the reference bill. */
 const DECL_W = 180;
 
-type F = 'R' | 'B' | 'I' | 'O' | 'D';
+export type F = 'R' | 'B' | 'I' | 'O' | 'D';
 
-class Pen {
+export class Pen {
   constructor(private page: PDFPage, private fonts: Record<F, PDFFont>) {}
 
   width(s: string, f: F, sz: number): number {
@@ -93,14 +93,15 @@ class Pen {
   }
 }
 
-export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAssets): Promise<Uint8Array> {
+/** A new A4 document with the bill fonts embedded. */
+export async function newA4(title: string, author: string, date: string, assets: PdfAssets) {
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
-  pdf.setTitle(`Tax Invoice ${doc.invoiceNo}`);
-  pdf.setAuthor(doc.shop.name);
+  pdf.setTitle(title);
+  pdf.setAuthor(author);
   pdf.setCreator('SRJ Billing');
   pdf.setProducer('SRJ Billing');
-  const fixed = new Date(doc.date + 'T12:00:00');
+  const fixed = new Date(date + 'T12:00:00');
   pdf.setCreationDate(fixed);
   pdf.setModificationDate(fixed);
   const fonts: Record<F, PDFFont> = {
@@ -111,7 +112,24 @@ export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAss
     D: await pdf.embedFont(assets.rupee, { subset: true }),
   };
   const page = pdf.addPage([W, H]);
-  const p = new Pen(page, fonts);
+  return { pdf, page, fonts, p: new Pen(page, fonts) };
+}
+
+/** Big translucent CANCELLED stamp across the given area (default: the whole page). */
+export function stampCancelled(page: PDFPage, fonts: Record<F, PDFFont>, centreY = H / 2, size = 90) {
+  page.drawText('CANCELLED', {
+    x: W / 2 - size * 2.1,
+    y: centreY - size,
+    size,
+    font: fonts.B,
+    color: rgb(0.85, 0.1, 0.1),
+    opacity: 0.35,
+    rotate: degrees(30),
+  });
+}
+
+export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAssets): Promise<Uint8Array> {
+  const { pdf, page, fonts, p } = await newA4(`Tax Invoice ${doc.invoiceNo}`, doc.shop.name, doc.date, assets);
   const { shop, buyer } = doc;
 
   // 1. Logo, centred, 60 pt tall
@@ -317,17 +335,7 @@ export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAss
   // 11.
   p.tc(W / 2, fb - 14, 'This is a Computer Generated Invoice', 'R', 8);
 
-  if (doc.cancelled) {
-    page.drawText('CANCELLED', {
-      x: W / 2 - 190,
-      y: H / 2 - 90,
-      size: 90,
-      font: fonts.B,
-      color: rgb(0.85, 0.1, 0.1),
-      opacity: 0.35,
-      rotate: degrees(30),
-    });
-  }
+  if (doc.cancelled) stampCancelled(page, fonts);
 
   return pdf.save({ useObjectStreams: false });
 }

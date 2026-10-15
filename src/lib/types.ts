@@ -18,6 +18,8 @@ export interface Settings {
   bankAccount: string;
   bankBranchIfsc: string;
   invoicePrefix: string;
+  /** Estimates have their own series, e.g. EST/26-27/001 */
+  estimatePrefix: string;
   /** Starting number for the given FY, only used while that FY has no bills. */
   invoiceStart: { fy: string; seq: number } | null;
   /** hundredths of a percent: 300 = 3% */
@@ -97,3 +99,25 @@ export interface DailyRates {
 }
 
 export type { Metal, MakingType };
+
+/** Customer details on an estimate (kept short on purpose). */
+export interface EstimateCustomer {
+  name: string;
+  mobile: string;
+  otherMobile: string;
+}
+
+/** Everything needed to render (and re-render) an estimate PDF. */
+export interface EstimateDoc {
+  estimateNo: string;
+  date: string; // YYYY-MM-DD
+  shop: ShopSnapshot;
+  customer: EstimateCustomer;
+  items: ItemCalc[];
+  totalWeightMg: number;
+  subtotal: number;
+  roundOff: number;
+  grand: number;
+  paymentMode: PaymentMode;
+  cancelled?: boolean;
+}

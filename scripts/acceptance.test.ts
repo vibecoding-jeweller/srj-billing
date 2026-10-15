@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildBillDoc, DEFAULT_SETTINGS, shopSnapshot } from '../src/lib/bill';
+import { buildBillDoc, buildEstimateDoc, DEFAULT_SETTINGS, shopSnapshot } from '../src/lib/bill';
+import { renderEstimatePdf } from '../src/lib/estimatePdf';
 import { renderBillPdf, type PdfAssets } from '../src/lib/pdf';
 import { amountInWords } from '../src/lib/words';
 
@@ -68,5 +69,31 @@ describe('acceptance test', () => {
     });
     expect(mixed.items.map((i) => i.hsn)).toEqual(['7113', '7114', '7113']); // blank falls back to the default
     writeFileSync(join(root, 'out', 'mixed_hsn_customer.pdf'), await renderBillPdf(mixed, 'customer', assets));
+  });
+
+  it('produces the sample estimate (handwritten pad, 08-Oct-26)', async () => {
+    const est = buildEstimateDoc({
+      estimateNo: 'EST/26-27/001',
+      date: '2026-10-08',
+      shop: shopSnapshot(DEFAULT_SETTINGS, ''),
+      customer: { name: 'Lakhmichand Sharma', mobile: '9027515504', otherMobile: '9720275804' },
+      items: [
+        { description: 'Silver Payal', metal: 'SILVER', weightMg: 147_000, rateInput: 2_15_000_00, makingType: 'FIXED', makingValue: 300_00, hsn: '' },
+        { description: 'Ladies Ring', metal: 'GOLD22', weightMg: 3_620, rateInput: 1_38_000_00, makingType: 'PCT', makingValue: 900, hsn: '' },
+      ],
+      paymentMode: 'Cash',
+    });
+    expect(est.grand).toBe(86_357_00);
+    expect(est.items.map((i) => i.description)).toEqual(['Silver Payal', 'Ladies Ring 22kt']);
+    const assets: PdfAssets = {
+      regular: font('LiberationSans-Regular.ttf'),
+      bold: font('LiberationSans-Bold.ttf'),
+      boldItalic: font('LiberationSans-BoldItalic.ttf'),
+      italic: font('LiberationSans-Italic.ttf'),
+      rupee: font('DejaVuSans-Bold.ttf'),
+      logo: new Uint8Array(readFileSync(join(root, 'src/assets/logo.png'))),
+    };
+    mkdirSync(join(root, 'out'), { recursive: true });
+    writeFileSync(join(root, 'out', 'sample_estimate.pdf'), await renderEstimatePdf(est, assets));
   });
 });

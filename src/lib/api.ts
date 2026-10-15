@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { MakingType, Metal, PaymentMode } from './calc';
 import { DEFAULT_SETTINGS } from './bill';
-import type { BillDoc, Buyer, DailyRates, Settings, ShopSnapshot } from './types';
+import type { BillDoc, Buyer, DailyRates, EstimateCustomer, EstimateDoc, Settings, ShopSnapshot } from './types';
 import defaultLogoUrl from '../assets/logo.png?url';
 
 type Row = Record<string, unknown>;
@@ -151,9 +151,13 @@ export const saveInvoice = (invoice: NewInvoicePayload) =>
 
 export const cancelInvoice = (id: number, reason: string) => invoke<number>('cancel_invoice', { id, reason });
 
-export interface InvoiceListRow {
+export type RecordKind = 'BILL' | 'EST';
+
+/** One row in Old Bills: a GST bill or an estimate. */
+export interface RecordRow {
+  kind: RecordKind;
   id: number;
-  invoice_no: string;
+  no: string;
   date: string;
   name: string;
   mobile: string;
@@ -163,15 +167,14 @@ export interface InvoiceListRow {
   modes: string | null;
 }
 
-export async function listInvoices(f: { q: string; from: string; to: string }): Promise<InvoiceListRow[]> {
+/** Bills and estimates together, newest first, with the same filters applied to both. */
+export async function listRecords(f: { q: string; from: string; to: string; kind: '' | RecordKind }): Promise<RecordRow[]> {
   const where: string[] = [];
   const args: unknown[] = [];
   if (f.q.trim()) {
     const like = `%${f.q.trim()}%`;
-    args.push(like, like, like);
-    where.push(
-      `(invoice_no LIKE ?${args.length - 2} OR json_extract(buyer_snapshot,'$.name') LIKE ?${args.length - 1} OR json_extract(buyer_snapshot,'$.mobile') LIKE ?${args.length})`,
-    );
+    args.push(like);
+    where.push(`(no LIKE ?${args.length} OR name LIKE ?${args.length} OR mobile LIKE ?${args.length} OR other_mobile LIKE ?${args.length})`);
   }
   if (f.from) {
     args.push(f.from);
@@ -181,14 +184,101 @@ export async function listInvoices(f: { q: string; from: string; to: string }): 
     args.push(f.to);
     where.push(`date <= ?${args.length}`);
   }
-  return select<InvoiceListRow>(
-    `SELECT i.id, i.invoice_no, i.date, json_extract(i.buyer_snapshot,'$.name') AS name,
-       json_extract(i.buyer_snapshot,'$.mobile') AS mobile, i.grand_total, i.status, i.cancel_reason,
-       (SELECT group_concat(mode, ' + ') FROM payments p WHERE p.invoice_id = i.id) AS modes
-     FROM invoices i ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY i.id DESC LIMIT 500`,
+  if (f.kind) {
+    args.push(f.kind);
+    where.push(`kind = ?${args.length}`);
+  }
+  return select<RecordRow>(
+    `SELECT kind, id, no, date, name, mobile, grand_total, status, cancel_reason, modes FROM (
+       SELECT 'BILL' AS kind, i.id, i.invoice_no AS no, i.date, i.created_at,
+         json_extract(i.buyer_snapshot,'$.name') AS name, json_extract(i.buyer_snapshot,'$.mobile') AS mobile,
+         '' AS other_mobile, i.grand_total, i.status, i.cancel_reason,
+         (SELECT group_concat(mode, ' + ') FROM payments p WHERE p.invoice_id = i.id) AS modes
+       FROM invoices i
+       UNION ALL
+       SELECT 'EST', e.id, e.estimate_no, e.date, e.created_at,
+         json_extract(e.customer_snapshot,'$.name'), json_extract(e.customer_snapshot,'$.mobile'),
+         json_extract(e.customer_snapshot,'$.otherMobile'), e.grand_total, e.status, e.cancel_reason, e.payment_mode
+       FROM estimates e
+     ) ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY date DESC, created_at DESC, id DESC LIMIT 500`,
     args,
   );
+}
+
+/** Descriptions used on earlier bills and estimates, most used first (for the description search). */
+export async function pastDescriptions(): Promise<string[]> {
+  const rows = await select<{ d: string }>(
+    `SELECT description AS d FROM (SELECT description FROM invoice_items UNION ALL SELECT description FROM estimate_items)
+     GROUP BY lower(description) ORDER BY COUNT(*) DESC LIMIT 300`,
+  );
+  return rows.map((r) => r.d);
+}
+
+// ---------- estimates ----------
+
+export interface NewEstimatePayload {
+  date: string;
+  fy: string;
+  prefix: string;
+  customer: { mobile: string; name: string } | null;
+  customer_snapshot: EstimateCustomer;
+  shop_snapshot: ShopSnapshot;
+  logo: { hash: string; data_url: string } | null;
+  subtotal: number;
+  round_off: number;
+  grand_total: number;
+  payment_mode: PaymentMode;
+  items: {
+    description: string;
+    metal: Metal;
+    weight_mg: number;
+    rate_input: number;
+    rate_per_g: number;
+    metal_value: number;
+    making_type: MakingType;
+    making_value: number;
+    making_amount: number;
+  }[];
+}
+
+export const saveEstimate = (estimate: NewEstimatePayload) =>
+  invoke<{ id: number; estimate_no: string; seq: number }>('save_estimate', { estimate });
+
+export const cancelEstimate = (id: number, reason: string) => invoke<number>('cancel_estimate', { id, reason });
+
+export async function getEstimateDoc(id: number): Promise<{ doc: EstimateDoc; logo: string }> {
+  const [e] = await select<Row>('SELECT * FROM estimates WHERE id = ?1', [id]);
+  if (!e) throw new Error('Estimate not found');
+  const items = await select<Row>('SELECT * FROM estimate_items WHERE estimate_id = ?1 ORDER BY sl', [id]);
+  const shop = JSON.parse(String(e.shop_snapshot)) as ShopSnapshot;
+  const logoRow = shop.logoHash ? await select<{ data_url: string }>('SELECT data_url FROM logos WHERE hash = ?1', [shop.logoHash]) : [];
+  const n = (v: unknown) => Number(v);
+  const doc: EstimateDoc = {
+    estimateNo: String(e.estimate_no),
+    date: String(e.date),
+    shop,
+    customer: JSON.parse(String(e.customer_snapshot)) as EstimateCustomer,
+    items: items.map((r) => ({
+      description: String(r.description),
+      metal: r.metal as Metal,
+      weightMg: n(r.weight_mg),
+      rateInput: n(r.rate_input),
+      ratePerG: n(r.rate_per_g),
+      metalValue: n(r.metal_value),
+      makingType: r.making_type as MakingType,
+      makingValue: n(r.making_value),
+      makingAmount: n(r.making_amount),
+      hsn: '',
+    })),
+    totalWeightMg: items.reduce((s, r) => s + n(r.weight_mg), 0),
+    subtotal: n(e.subtotal),
+    roundOff: n(e.round_off),
+    grand: n(e.grand_total),
+    paymentMode: e.payment_mode as PaymentMode,
+    cancelled: e.status === 'CANCELLED',
+  };
+  return { doc, logo: logoRow[0]?.data_url ?? '' };
 }
 
 /** Rebuild the full bill from the frozen snapshot, so reprints never change. */

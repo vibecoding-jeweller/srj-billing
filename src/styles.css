@@ -94,6 +94,38 @@ table.items .making select { width: 92px; flex: none; }
 .pay-row { display: grid; grid-template-columns: 160px 1fr 1fr 32px; gap: 10px; align-items: start; }
 .pay-row .rm { margin-top: 22px; }
 
+/* item rows: two lines per item, so the description is wide */
+.items-list { display: flex; flex-direction: column; }
+.item { display: grid; grid-template-columns: 30px 1fr; column-gap: 10px; row-gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.item:first-child { padding-top: 0; }
+.item-no { grid-row: span 2; font-weight: 800; color: var(--muted); padding-top: 28px; text-align: center; }
+.item-line1 { display: grid; grid-template-columns: 1fr 170px; gap: 12px; }
+.item-line1.with-hsn { grid-template-columns: 1fr 100px 170px; }
+.item-line2 { display: grid; grid-template-columns: 140px 170px 240px 1fr 28px; gap: 12px; align-items: start; }
+.item-line1 input, .item-line1 select, .item-line2 input, .item-line2 select { width: 100%; }
+.item-line1 .combo input { font-size: 1.1rem; padding: 10px 12px; }
+.item-amount { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding-top: 2px; }
+.item-amount b { font-size: 1.2rem; font-variant-numeric: tabular-nums; padding-top: 6px; }
+.item-line2 .rm { margin-top: 24px; }
+.item-line2 .making select { width: 92px; flex: none; }
+.sub-link { font-size: 0.78rem; padding: 0; align-self: flex-end; font-weight: 600; }
+span.sub { text-align: left; font-weight: 400; }
+
+/* description search */
+.combo { position: relative; }
+.combo-list { position: absolute; z-index: 5; left: 0; right: 0; top: calc(100% + 4px); margin: 0; padding: 4px; list-style: none; background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); max-height: 320px; overflow: auto; color: var(--ink); font-weight: 400; font-size: 1rem; }
+.combo-list li { padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+.combo-list li.hi { background: var(--accent-soft); }
+.combo-list li b { color: var(--accent); }
+.combo-list li.combo-hint { cursor: default; font-size: 0.75rem; color: var(--muted); border-top: 1px solid var(--line); border-radius: 0; margin-top: 4px; padding: 6px 12px 2px; }
+
+.estimate-note { background: var(--accent-soft); color: var(--accent); }
+.totals-bar { display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; }
+.totals-bar .grand-sum { font-size: 1.1rem; }
+.badge.kind-bill { background: #e6eefb; color: #1d4e9e; }
+.badge.kind-est { background: var(--accent-soft); color: var(--accent); }
+.nowrap { white-space: nowrap; }
+
 /* ---------- old bills ---------- */
 table.list { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 table.list th, table.list td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; }

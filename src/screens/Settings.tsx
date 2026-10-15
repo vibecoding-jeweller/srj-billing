@@ -62,6 +62,9 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
     if (!s.shopName.trim()) return setMsg({ kind: 'error', text: 'Shop name is required.' });
     if (!s.billsFolder.trim()) return setMsg({ kind: 'error', text: 'Choose a Bills folder.' });
     if (!/^[A-Za-z0-9]{1,10}$/.test(s.invoicePrefix)) return setMsg({ kind: 'error', text: 'Invoice prefix: letters and numbers only (e.g. SR).' });
+    if (!/^[A-Za-z0-9]{1,10}$/.test(s.estimatePrefix)) return setMsg({ kind: 'error', text: 'Estimate prefix: letters and numbers only (e.g. EST).' });
+    if (s.estimatePrefix.toUpperCase() === s.invoicePrefix.toUpperCase())
+      return setMsg({ kind: 'error', text: 'Estimate prefix must be different from the invoice prefix.' });
     let invoiceStart = s.invoiceStart;
     if (billsThisFy === 0) {
       const n = Number(nextNo);
@@ -73,6 +76,7 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
       shopName: s.shopName.trim(),
       addressLines: address.split('\n').map((l) => l.trim()).filter(Boolean),
       invoicePrefix: s.invoicePrefix.toUpperCase(),
+      estimatePrefix: s.estimatePrefix.toUpperCase(),
       gstin: s.gstin.trim().toUpperCase(),
       pan: s.pan.trim().toUpperCase(),
       gstRate,
@@ -207,6 +211,12 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
             Next bill will be
             <div style={{ fontSize: '1.1rem', color: 'var(--ink)', paddingTop: 8 }}>{nextPreview}</div>
           </div>
+          <label className="field">
+            <span>
+              Estimate prefix <span className="hint">(EST/{fy}/001…)</span>
+            </span>
+            <input value={s.estimatePrefix} onChange={(e) => set('estimatePrefix', e.target.value.toUpperCase())} />
+          </label>
           <label className="field">
             GST rate (%) <span className="hint">split equally CGST + SGST</span>
             <input className="num" inputMode="decimal" value={gst} onChange={(e) => setGst(e.target.value)} />

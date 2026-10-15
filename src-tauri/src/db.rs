@@ -92,6 +92,56 @@ CREATE TRIGGER IF NOT EXISTS payments_no_update BEFORE UPDATE ON payments
 BEGIN SELECT RAISE(ABORT, 'Saved bills cannot be edited'); END;
 CREATE TRIGGER IF NOT EXISTS payments_no_delete BEFORE DELETE ON payments
 BEGIN SELECT RAISE(ABORT, 'Saved bills cannot be edited'); END;
+CREATE TABLE IF NOT EXISTS estimates (
+  id INTEGER PRIMARY KEY,
+  estimate_no TEXT UNIQUE NOT NULL,
+  fy TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  customer_id INTEGER REFERENCES customers(id),
+  customer_snapshot TEXT NOT NULL,
+  shop_snapshot TEXT NOT NULL,
+  subtotal INTEGER NOT NULL,
+  round_off INTEGER NOT NULL,
+  grand_total INTEGER NOT NULL,
+  payment_mode TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','CANCELLED')),
+  cancel_reason TEXT,
+  cancelled_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  UNIQUE (fy, seq)
+);
+CREATE INDEX IF NOT EXISTS estimates_date ON estimates(date);
+
+CREATE TABLE IF NOT EXISTS estimate_items (
+  id INTEGER PRIMARY KEY,
+  estimate_id INTEGER NOT NULL REFERENCES estimates(id),
+  sl INTEGER NOT NULL,
+  description TEXT NOT NULL,
+  metal TEXT NOT NULL,
+  weight_mg INTEGER NOT NULL,
+  rate_input INTEGER NOT NULL,
+  rate_per_g INTEGER NOT NULL,
+  metal_value INTEGER NOT NULL,
+  making_type TEXT NOT NULL,
+  making_value INTEGER NOT NULL,
+  making_amount INTEGER NOT NULL
+);
+
+-- Estimates follow the same rule as bills: never edited or deleted, only cancelled.
+CREATE TRIGGER IF NOT EXISTS estimates_no_delete BEFORE DELETE ON estimates
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS estimates_only_cancel BEFORE UPDATE ON estimates
+WHEN NOT (OLD.status = 'ACTIVE' AND NEW.status = 'CANCELLED'
+  AND NEW.estimate_no IS OLD.estimate_no AND NEW.fy IS OLD.fy AND NEW.seq IS OLD.seq AND NEW.date IS OLD.date
+  AND NEW.customer_id IS OLD.customer_id AND NEW.customer_snapshot IS OLD.customer_snapshot
+  AND NEW.shop_snapshot IS OLD.shop_snapshot AND NEW.subtotal IS OLD.subtotal AND NEW.round_off IS OLD.round_off
+  AND NEW.grand_total IS OLD.grand_total AND NEW.payment_mode IS OLD.payment_mode AND NEW.created_at IS OLD.created_at)
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited, only cancelled'); END;
+CREATE TRIGGER IF NOT EXISTS estimate_items_no_update BEFORE UPDATE ON estimate_items
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited'); END;
+CREATE TRIGGER IF NOT EXISTS estimate_items_no_delete BEFORE DELETE ON estimate_items
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited'); END;
 "#;
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
@@ -181,6 +231,7 @@ pub struct NewItem {
     pub making_type: String,
     pub making_value: i64,
     pub making_amount: i64,
+    #[serde(default)]
     pub hsn: String,
 }
 
@@ -313,6 +364,110 @@ pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result
     Ok(SavedInvoice { id, invoice_no, seq })
 }
 
+#[derive(Deserialize, Debug)]
+pub struct EstimateCustomer {
+    pub mobile: String,
+    pub name: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NewEstimate {
+    pub date: String,
+    pub fy: String,
+    pub prefix: String,
+    pub customer: Option<EstimateCustomer>,
+    pub customer_snapshot: Value,
+    pub shop_snapshot: Value,
+    pub logo: Option<NewLogo>,
+    pub subtotal: i64,
+    pub round_off: i64,
+    pub grand_total: i64,
+    pub payment_mode: String,
+    pub items: Vec<NewItem>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SavedEstimate {
+    pub id: i64,
+    pub estimate_no: String,
+    pub seq: i64,
+}
+
+/// Same rules as bills: number assigned inside the transaction, own series per FY.
+pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Result<SavedEstimate> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let last: Option<i64> = tx.query_row("SELECT MAX(seq) FROM estimates WHERE fy = ?1", params![est.fy], |r| r.get(0))?;
+    let seq = last.map(|s| s + 1).unwrap_or(1);
+    let estimate_no = format_invoice_no(&est.prefix, &est.fy, seq);
+
+    // Remember the customer by mobile, but never overwrite bill details (address, PAN…) from an estimate.
+    let customer_id: Option<i64> = match &est.customer {
+        Some(c) if !c.mobile.is_empty() => {
+            tx.execute(
+                "INSERT INTO customers (mobile, name) VALUES (?1, ?2)
+                 ON CONFLICT(mobile) DO UPDATE SET
+                   name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE customers.name END,
+                   updated_at = datetime('now','localtime')",
+                params![c.mobile, c.name],
+            )?;
+            Some(tx.query_row("SELECT id FROM customers WHERE mobile = ?1", params![c.mobile], |r| r.get(0))?)
+        }
+        _ => None,
+    };
+    if let Some(l) = &est.logo {
+        tx.execute("INSERT OR IGNORE INTO logos (hash, data_url) VALUES (?1, ?2)", params![l.hash, l.data_url])?;
+    }
+    tx.execute(
+        "INSERT INTO estimates (estimate_no, fy, seq, date, customer_id, customer_snapshot, shop_snapshot,
+           subtotal, round_off, grand_total, payment_mode, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'ACTIVE')",
+        params![
+            estimate_no,
+            est.fy,
+            seq,
+            est.date,
+            customer_id,
+            est.customer_snapshot.to_string(),
+            est.shop_snapshot.to_string(),
+            est.subtotal,
+            est.round_off,
+            est.grand_total,
+            est.payment_mode
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    for (i, it) in est.items.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO estimate_items (estimate_id, sl, description, metal, weight_mg, rate_input, rate_per_g,
+               metal_value, making_type, making_value, making_amount)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                id,
+                (i + 1) as i64,
+                it.description,
+                it.metal,
+                it.weight_mg,
+                it.rate_input,
+                it.rate_per_g,
+                it.metal_value,
+                it.making_type,
+                it.making_value,
+                it.making_amount
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(SavedEstimate { id, estimate_no, seq })
+}
+
+pub fn cancel_estimate(conn: &Connection, id: i64, reason: &str) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE estimates SET status='CANCELLED', cancel_reason=?2, cancelled_at=datetime('now','localtime')
+         WHERE id=?1 AND status='ACTIVE'",
+        params![id, reason],
+    )
+}
+
 pub fn cancel_invoice(conn: &Connection, id: i64, reason: &str) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE invoices SET status='CANCELLED', cancel_reason=?2, cancelled_at=datetime('now','localtime')
@@ -432,5 +587,58 @@ mod tests {
         let rows = select(&c, "SELECT address FROM customers", &[]).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["address"], "New address");
+    }
+
+    fn estimate(date: &str, fy: &str, mobile: &str, name: &str) -> NewEstimate {
+        NewEstimate {
+            date: date.into(),
+            fy: fy.into(),
+            prefix: "EST".into(),
+            customer: Some(EstimateCustomer { mobile: mobile.into(), name: name.into() }),
+            customer_snapshot: json!({"name": name}),
+            shop_snapshot: json!({"name": "S.R. Jewellers"}),
+            logo: None,
+            subtotal: 8635704,
+            round_off: -4,
+            grand_total: 8635700,
+            payment_mode: "Cash".into(),
+            items: invoice(date, fy).items,
+        }
+    }
+
+    #[test]
+    fn estimates_have_their_own_series_and_reset_each_fy() {
+        let mut c = mem();
+        save_invoice(&mut c, &invoice("2026-10-08", "26-27")).unwrap();
+        assert_eq!(save_estimate(&mut c, &estimate("2026-10-08", "26-27", "", "Cash")).unwrap().estimate_no, "EST/26-27/001");
+        assert_eq!(save_estimate(&mut c, &estimate("2027-03-31", "26-27", "", "Cash")).unwrap().estimate_no, "EST/26-27/002");
+        assert_eq!(save_estimate(&mut c, &estimate("2027-04-01", "27-28", "", "Cash")).unwrap().estimate_no, "EST/27-28/001");
+        // bill numbering is not affected by estimates
+        assert_eq!(save_invoice(&mut c, &invoice("2026-10-09", "26-27")).unwrap().invoice_no, "SR/26-27/002");
+    }
+
+    #[test]
+    fn estimates_can_only_be_cancelled() {
+        let mut c = mem();
+        let e = save_estimate(&mut c, &estimate("2026-10-08", "26-27", "", "Cash")).unwrap();
+        assert!(c.execute("UPDATE estimates SET grand_total = 1 WHERE id = ?1", [e.id]).is_err());
+        assert!(c.execute("DELETE FROM estimates WHERE id = ?1", [e.id]).is_err());
+        assert!(c.execute("DELETE FROM estimate_items", []).is_err());
+        assert_eq!(cancel_estimate(&c, e.id, "customer changed mind").unwrap(), 1);
+        assert_eq!(cancel_estimate(&c, e.id, "again").unwrap(), 0);
+        assert_eq!(save_estimate(&mut c, &estimate("2026-10-08", "26-27", "", "Cash")).unwrap().estimate_no, "EST/26-27/002");
+    }
+
+    #[test]
+    fn estimate_keeps_customer_bill_details() {
+        let mut c = mem();
+        save_invoice(&mut c, &invoice("2026-10-08", "26-27")).unwrap(); // stores Uttarakhand address details
+        save_estimate(&mut c, &estimate("2026-10-09", "26-27", "7060329291", "")).unwrap();
+        let rows = select(&c, "SELECT name, state FROM customers", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "Shruti");
+        assert_eq!(rows[0]["state"], "Uttarakhand");
+        save_estimate(&mut c, &estimate("2026-10-09", "26-27", "9027515504", "Lakhmichand Sharma")).unwrap();
+        assert_eq!(select(&c, "SELECT COUNT(*) AS n FROM customers", &[]).unwrap()[0]["n"], 2);
     }
 }

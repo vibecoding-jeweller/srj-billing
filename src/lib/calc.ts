@@ -152,3 +152,36 @@ export function makingLabel(it: Pick<ItemInput, 'makingType' | 'makingValue'>, f
       return 'Making Charges';
   }
 }
+
+export interface EstimateCalc {
+  items: ItemCalc[];
+  totalWeightMg: number;
+  /** Σ (metal value + making) */
+  subtotal: number;
+  roundOff: number;
+  /** subtotal rounded to the nearest rupee (half up) */
+  grand: number;
+}
+
+/** Estimate (no GST): item amounts added up and rounded to the rupee. */
+export function calcEstimate(items: ItemInput[]): EstimateCalc {
+  const calc = items.map(calcItem);
+  const subtotal = calc.reduce((s, i) => s + i.metalValue + i.makingAmount, 0);
+  const grand = Number(divRoundHalfUp(BigInt(subtotal), 100n) * 100n);
+  return {
+    items: calc,
+    totalWeightMg: calc.reduce((s, i) => s + i.weightMg, 0),
+    subtotal,
+    roundOff: grand - subtotal,
+    grand,
+  };
+}
+
+/** Best metal for a picked description ("Silver Payal" → Silver), else keep the current one. */
+export function metalForDescription(desc: string, current: Metal): Metal {
+  if (/silver|chandi|चांदी/i.test(desc)) return 'SILVER';
+  if (/\b18\s*(k|kt|ct)\b/i.test(desc)) return 'GOLD18';
+  if (/\b22\s*(k|kt|ct)\b/i.test(desc)) return 'GOLD22';
+  if (/gold|sona|सोना/i.test(desc) && current === 'SILVER') return 'GOLD22';
+  return current;
+}
