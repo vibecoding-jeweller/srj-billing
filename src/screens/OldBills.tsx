@@ -86,6 +86,7 @@ export function OldBills({ settings }: { settings: Settings }) {
   // Sales totals for what is listed (cancelled ones not counted)
   const active = rows.filter((r) => r.status === 'ACTIVE');
   const sum = (k: RecordKind) => active.filter((r) => r.kind === k).reduce((s, r) => s + r.grand_total, 0);
+  const exchanged = active.reduce((s, r) => s + (r.exchange || 0), 0);
   const count = (k: RecordKind) => active.filter((r) => r.kind === k).length;
 
   return (
@@ -134,6 +135,7 @@ export function OldBills({ settings }: { settings: Settings }) {
         {kind !== 'BILL' && (
           <span>
             Estimates ({count('EST')}): <b>₹{fmtMoney(sum('EST'))}</b>
+            {exchanged > 0 && <span className="hint"> + old jewellery ₹{fmtMoney(exchanged)}</span>}
           </span>
         )}
         {!kind && (

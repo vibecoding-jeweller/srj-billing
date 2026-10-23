@@ -25,6 +25,14 @@ describe('estimate (no GST)', () => {
     expect(e.roundOff).toBe(50);
   });
 
+  it('old jewellery exchange is taken off before rounding', () => {
+    const e = calcEstimate([payal, ladiesRing], [5_000_00, 1_250_50]);
+    expect(e.subtotal).toBe(86_357_04);
+    expect(e.exchangeTotal).toBe(6_250_50);
+    expect(e.grand).toBe(80_107_00); // 80,106.54 → 80,107
+    expect(e.roundOff).toBe(46);
+  });
+
   it('empty estimate is zero', () => {
     expect(calcEstimate([]).grand).toBe(0);
   });

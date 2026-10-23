@@ -95,5 +95,23 @@ describe('acceptance test', () => {
     };
     mkdirSync(join(root, 'out'), { recursive: true });
     writeFileSync(join(root, 'out', 'sample_estimate.pdf'), await renderEstimatePdf(est, assets));
+
+    // Same purchase, customer gives old silver worth ₹5,000 and pays the rest in cash
+    const ex = buildEstimateDoc({
+      estimateNo: 'EST/26-27/002',
+      date: '2026-10-08',
+      shop: shopSnapshot(DEFAULT_SETTINGS, ''),
+      customer: { name: 'Lakhmichand Sharma', mobile: '9027515504', otherMobile: '' },
+      items: [
+        { description: 'Silver Payal', metal: 'SILVER', weightMg: 147_000, rateInput: 2_15_000_00, makingType: 'FIXED', makingValue: 300_00, hsn: '' },
+        { description: 'Ladies Ring', metal: 'GOLD22', weightMg: 3_620, rateInput: 1_38_000_00, makingType: 'PCT', makingValue: 900, hsn: '' },
+      ],
+      exchanges: [{ description: 'old payal', amount: 5_000_00 }, { description: '', amount: 0 }],
+      paymentMode: 'Cash',
+    });
+    expect(ex.exchanges).toHaveLength(1); // zero lines dropped
+    expect(ex.exchangeTotal).toBe(5_000_00);
+    expect(ex.grand).toBe(81_357_00); // 86,357.04 − 5,000 = 81,357.04 → 81,357
+    writeFileSync(join(root, 'out', 'sample_estimate_exchange.pdf'), await renderEstimatePdf(ex, assets));
   });
 });

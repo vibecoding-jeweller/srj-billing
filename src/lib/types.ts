@@ -100,6 +100,12 @@ export interface DailyRates {
 
 export type { Metal, MakingType };
 
+/** Old jewellery taken in exchange on an estimate: money only, no weight or rate. */
+export interface ExchangeLine {
+  description: string;
+  amount: number; // paise
+}
+
 /** Customer details on an estimate (kept short on purpose). */
 export interface EstimateCustomer {
   name: string;
@@ -116,7 +122,10 @@ export interface EstimateDoc {
   items: ItemCalc[];
   totalWeightMg: number;
   subtotal: number;
+  exchanges: ExchangeLine[];
+  exchangeTotal: number;
   roundOff: number;
+  /** balance the customer pays */
   grand: number;
   paymentMode: PaymentMode;
   cancelled?: boolean;

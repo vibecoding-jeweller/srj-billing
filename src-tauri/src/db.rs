@@ -152,7 +152,49 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    migrate(conn)
+}
+
+/// Version 2 (app 0.2.0): customer CRM fields, old-jewellery exchange on estimates.
+const MIGRATION_V2: &str = r#"
+ALTER TABLE customers ADD COLUMN other_mobile TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN dob TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN anniversary TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE estimates ADD COLUMN exchange_total INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS estimate_exchanges (
+  id INTEGER PRIMARY KEY,
+  estimate_id INTEGER NOT NULL REFERENCES estimates(id),
+  sl INTEGER NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  amount INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS estimate_exchanges_no_update BEFORE UPDATE ON estimate_exchanges
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited'); END;
+CREATE TRIGGER IF NOT EXISTS estimate_exchanges_no_delete BEFORE DELETE ON estimate_exchanges
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited'); END;
+
+-- the edit guard must also cover the new column
+DROP TRIGGER IF EXISTS estimates_only_cancel;
+CREATE TRIGGER estimates_only_cancel BEFORE UPDATE ON estimates
+WHEN NOT (OLD.status = 'ACTIVE' AND NEW.status = 'CANCELLED'
+  AND NEW.estimate_no IS OLD.estimate_no AND NEW.fy IS OLD.fy AND NEW.seq IS OLD.seq AND NEW.date IS OLD.date
+  AND NEW.customer_id IS OLD.customer_id AND NEW.customer_snapshot IS OLD.customer_snapshot
+  AND NEW.shop_snapshot IS OLD.shop_snapshot AND NEW.subtotal IS OLD.subtotal AND NEW.round_off IS OLD.round_off
+  AND NEW.grand_total IS OLD.grand_total AND NEW.payment_mode IS OLD.payment_mode AND NEW.created_at IS OLD.created_at
+  AND NEW.exchange_total IS OLD.exchange_total)
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited, only cancelled'); END;
+"#;
+
+/// Brings an older database up to date, one version at a time, each step in a transaction.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 2 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V2} PRAGMA user_version = 2; COMMIT;"))?;
+    }
+    Ok(())
 }
 
 fn to_sql(v: &Value) -> Box<dyn ToSql> {
@@ -368,6 +410,14 @@ pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result
 pub struct EstimateCustomer {
     pub mobile: String,
     pub name: String,
+    #[serde(default)]
+    pub other_mobile: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NewExchange {
+    pub description: String,
+    pub amount: i64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -384,6 +434,9 @@ pub struct NewEstimate {
     pub grand_total: i64,
     pub payment_mode: String,
     pub items: Vec<NewItem>,
+    /// Old jewellery taken in exchange: money only, deducted from the total
+    #[serde(default)]
+    pub exchanges: Vec<NewExchange>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -404,11 +457,12 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
     let customer_id: Option<i64> = match &est.customer {
         Some(c) if !c.mobile.is_empty() => {
             tx.execute(
-                "INSERT INTO customers (mobile, name) VALUES (?1, ?2)
+                "INSERT INTO customers (mobile, name, other_mobile) VALUES (?1, ?2, ?3)
                  ON CONFLICT(mobile) DO UPDATE SET
                    name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE customers.name END,
+                   other_mobile = CASE WHEN excluded.other_mobile <> '' THEN excluded.other_mobile ELSE customers.other_mobile END,
                    updated_at = datetime('now','localtime')",
-                params![c.mobile, c.name],
+                params![c.mobile, c.name, c.other_mobile],
             )?;
             Some(tx.query_row("SELECT id FROM customers WHERE mobile = ?1", params![c.mobile], |r| r.get(0))?)
         }
@@ -419,8 +473,8 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
     }
     tx.execute(
         "INSERT INTO estimates (estimate_no, fy, seq, date, customer_id, customer_snapshot, shop_snapshot,
-           subtotal, round_off, grand_total, payment_mode, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'ACTIVE')",
+           subtotal, round_off, grand_total, payment_mode, exchange_total, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ACTIVE')",
         params![
             estimate_no,
             est.fy,
@@ -432,7 +486,8 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
             est.subtotal,
             est.round_off,
             est.grand_total,
-            est.payment_mode
+            est.payment_mode,
+            est.exchanges.iter().map(|x| x.amount).sum::<i64>()
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -454,6 +509,12 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
                 it.making_value,
                 it.making_amount
             ],
+        )?;
+    }
+    for (i, x) in est.exchanges.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO estimate_exchanges (estimate_id, sl, description, amount) VALUES (?1, ?2, ?3, ?4)",
+            params![id, (i + 1) as i64, x.description, x.amount],
         )?;
     }
     tx.commit()?;
@@ -594,7 +655,7 @@ mod tests {
             date: date.into(),
             fy: fy.into(),
             prefix: "EST".into(),
-            customer: Some(EstimateCustomer { mobile: mobile.into(), name: name.into() }),
+            customer: Some(EstimateCustomer { mobile: mobile.into(), name: name.into(), other_mobile: "".into() }),
             customer_snapshot: json!({"name": name}),
             shop_snapshot: json!({"name": "S.R. Jewellers"}),
             logo: None,
@@ -603,6 +664,7 @@ mod tests {
             grand_total: 8635700,
             payment_mode: "Cash".into(),
             items: invoice(date, fy).items,
+            exchanges: vec![],
         }
     }
 
@@ -640,5 +702,56 @@ mod tests {
         assert_eq!(rows[0]["state"], "Uttarakhand");
         save_estimate(&mut c, &estimate("2026-10-09", "26-27", "9027515504", "Lakhmichand Sharma")).unwrap();
         assert_eq!(select(&c, "SELECT COUNT(*) AS n FROM customers", &[]).unwrap()[0]["n"], 2);
+    }
+
+    #[test]
+    fn exchange_is_stored_and_cannot_be_edited() {
+        let mut c = mem();
+        let mut e = estimate("2026-10-15", "26-27", "", "Cash");
+        e.exchanges = vec![
+            NewExchange { description: "Old payal".into(), amount: 500000 },
+            NewExchange { description: "".into(), amount: 120000 },
+        ];
+        let saved = save_estimate(&mut c, &e).unwrap();
+        let rows = select(&c, "SELECT exchange_total FROM estimates WHERE id = ?1", &[saved.id.into()]).unwrap();
+        assert_eq!(rows[0]["exchange_total"], 620000);
+        assert!(c.execute("UPDATE estimates SET exchange_total = 0 WHERE id = ?1", [saved.id]).is_err());
+        assert!(c.execute("DELETE FROM estimate_exchanges", []).is_err());
+        assert!(c.execute("UPDATE estimate_exchanges SET amount = 1", []).is_err());
+        // cancelling still works with the new column
+        assert_eq!(cancel_estimate(&c, saved.id, "test").unwrap(), 1);
+    }
+
+    #[test]
+    fn upgrades_a_version_1_database_without_losing_data() {
+        // a 0.1.0 database: base schema only, user_version 0
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute("INSERT INTO customers (mobile, name) VALUES ('7060329291', 'Shruti')", []).unwrap();
+        c.execute(
+            "INSERT INTO estimates (estimate_no, fy, seq, date, customer_snapshot, shop_snapshot, subtotal, round_off, grand_total, payment_mode)
+             VALUES ('EST/26-27/001', '26-27', 1, '2026-10-08', '{}', '{}', 100, 0, 100, 'Cash')",
+            [],
+        )
+        .unwrap();
+        init(&c).unwrap();
+        init(&c).unwrap(); // running again is harmless
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
+        let rows = select(&c, "SELECT name, other_mobile, notes FROM customers", &[]).unwrap();
+        assert_eq!(rows[0]["name"], "Shruti");
+        assert_eq!(rows[0]["other_mobile"], "");
+        assert_eq!(select(&c, "SELECT exchange_total FROM estimates", &[]).unwrap()[0]["exchange_total"], 0);
+        assert_eq!(save_estimate(&mut c, &estimate("2026-10-09", "26-27", "", "Cash")).unwrap().estimate_no, "EST/26-27/002");
+    }
+
+    #[test]
+    fn estimate_saves_other_mobile_on_customer() {
+        let mut c = mem();
+        let mut e = estimate("2026-10-09", "26-27", "9027515504", "Lakhmichand Sharma");
+        e.customer.as_mut().unwrap().other_mobile = "9720275804".into();
+        save_estimate(&mut c, &e).unwrap();
+        let rows = select(&c, "SELECT other_mobile FROM customers", &[]).unwrap();
+        assert_eq!(rows[0]["other_mobile"], "9720275804");
     }
 }

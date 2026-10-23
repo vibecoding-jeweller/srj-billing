@@ -5,12 +5,14 @@ import { todayISO } from './lib/fy';
 import { fmtMoneyShort } from './lib/money';
 import type { DailyRates, Settings } from './lib/types';
 import { RatesModal } from './components/RatesModal';
+import { LiveClock } from './components/LiveClock';
 import { NewBill } from './screens/NewBill';
 import { Estimate } from './screens/Estimate';
 import { OldBills } from './screens/OldBills';
+import { Customers } from './screens/Customers';
 import { SettingsScreen } from './screens/Settings';
 
-type Screen = 'new' | 'estimate' | 'old' | 'settings';
+type Screen = 'new' | 'estimate' | 'old' | 'customers' | 'settings';
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('new');
@@ -91,6 +93,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">{settings.shopName}</div>
+        <LiveClock />
         <nav className="tabs">
           <button className={'tab' + (screen === 'new' ? ' active' : '')} onClick={() => setScreen('new')}>
             New Bill
@@ -100,6 +103,9 @@ export default function App() {
           </button>
           <button className={'tab' + (screen === 'old' ? ' active' : '')} onClick={() => setScreen('old')}>
             Old Bills
+          </button>
+          <button className={'tab' + (screen === 'customers' ? ' active' : '')} onClick={() => setScreen('customers')}>
+            Customers
           </button>
           <button className={'tab' + (screen === 'settings' ? ' active' : '')} onClick={() => setScreen('settings')}>
             Settings
@@ -120,6 +126,7 @@ export default function App() {
           <Estimate settings={settings} rates={rates} active={screen === 'estimate'} suggestions={suggestions} onSaved={refreshSuggestions} />
         </div>
         {screen === 'old' && <OldBills settings={settings} />}
+        {screen === 'customers' && <Customers settings={settings} />}
         {screen === 'settings' && <SettingsScreen settings={settings} onSave={updateSettings} />}
       </main>
       {ratesOpen && (

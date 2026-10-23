@@ -4,10 +4,11 @@ import { fmtMoney, fmtPct, fmtRoundOff, fmtWeight, paiseToInput, parsePaise } fr
 import { buildBillDoc, shopSnapshot } from '../lib/bill';
 import { CASH_BLOCK_MSG, checkBill, isCashBlocked, panRequired } from '../lib/validate';
 import { STATES, stateCode } from '../lib/states';
-import { financialYear, todayISO } from '../lib/fy';
+import { financialYear, fmtBillDate, todayISO } from '../lib/fy';
 import { backupNow, findCustomer, saveInvoice, sha256Hex, openPath, type NewInvoicePayload } from '../lib/api';
 import { printPdf, saveBillPdfs } from '../lib/output';
 import { focusNextOnEnter } from '../lib/keys';
+import { askYesNo, showError } from '../lib/dialogs';
 import { Modal } from '../components/Modal';
 import { ItemsEditor, newKey, parseRows, useItemRows } from '../components/ItemsEditor';
 import type { BillDoc, Buyer, DailyRates, Relation, Settings } from '../lib/types';
@@ -228,7 +229,7 @@ export function NewBill({
       backupNow().catch(() => {});
       if (result.pdf) await printPdf(result.pdf).catch((e) => setDone({ ...result, problem: `Printing failed: ${e}` }));
     } catch (e) {
-      alert(`The bill was NOT saved: ${e}`);
+      showError(`The bill was NOT saved: ${e}`);
     } finally {
       setSaving(false);
     }
@@ -416,6 +417,8 @@ export function NewBill({
         <section className="card stack">
           <h3>Bill summary</h3>
           <div className="lines">
+            <span>Bill date</span>
+            <span className="num">{fmtBillDate(todayISO())}</span>
             <span>Total weight</span>
             <span className="num">{fmtWeight(bill.totalWeightMg)} g</span>
             <span>Taxable value</span>
@@ -447,7 +450,7 @@ export function NewBill({
             Ctrl+P
           </div>
         </button>
-        <button type="button" className="link" style={{ alignSelf: 'center' }} onClick={() => confirm('Clear this bill and start again?') && reset()}>
+        <button type="button" className="link" style={{ alignSelf: 'center' }} onClick={async () => (await askYesNo('Clear this bill and start again?', 'Clear')) && reset()}>
           Clear form
         </button>
       </aside>

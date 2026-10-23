@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { getVersion } from '@tauri-apps/api/app';
 import { backupNow, countBillsInFy, lastSeqInFy } from '../lib/api';
 import { financialYear, formatInvoiceNo, todayISO } from '../lib/fy';
 import { fmtPct, parseScaled } from '../lib/money';
@@ -42,6 +43,11 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
   const [lastSeq, setLastSeq] = useState<number | null>(null);
   const [nextNo, setNextNo] = useState(String(settings.invoiceStart?.fy === fy ? settings.invoiceStart.seq : 1));
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+
+  const [version, setVersion] = useState('');
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
 
   useEffect(() => {
     countBillsInFy(fy).then(setBillsThisFy);
@@ -284,6 +290,7 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
           Save settings
         </button>
         {msg && <div className={'alert ' + msg.kind}>{msg.text}</div>}
+        <span className="hint" style={{ marginLeft: 'auto' }}>SRJ Billing {version && `v${version}`}</span>
       </div>
     </form>
   );

@@ -91,16 +91,23 @@ export async function renderEstimatePdf(doc: EstimateDoc, assets: PdfAssets): Pr
   p.t(L, y, `Total weight : ${fmtWeight(doc.totalWeightMg)} g`, 'R', 8.5);
   p.tr(cols[5] - 4, y, 'Sub total', 'R', 8.5);
   p.tr(R - 4, y, fmtMoney(doc.subtotal));
+  // Old jewellery taken in exchange: money only (no weight or rate printed)
+  for (const x of doc.exchanges) {
+    y -= 12;
+    const what = x.description ? `Less: Old jewellery (${x.description.slice(0, 30)})` : 'Less: Old jewellery exchange';
+    p.tr(cols[5] - 4, y, what, 'R', 8.5);
+    p.tr(R - 4, y, `(-)${fmtMoney(x.amount)}`);
+  }
   y -= 12;
-  p.t(L, y, `Payment : ${doc.paymentMode}`, 'R', 8.5);
   p.tr(cols[5] - 4, y, 'Round off', 'R', 8.5);
   p.tr(R - 4, y, fmtRoundOff(doc.roundOff));
+  p.t(L, tb - 26, `Payment : ${doc.paymentMode}`, 'R', 8.5);
   y -= 6;
   p.ln(cols[4], y, R, y);
   y -= 14;
   const totalText = `₹ ${fmtMoney(doc.grand)}`;
   p.tr(R - 4, y, totalText, 'D', 12);
-  p.tr(R - 4 - p.width(totalText, 'D', 12) - 10, y, 'Total', 'B', 11);
+  p.tr(R - 4 - p.width(totalText, 'D', 12) - 10, y, doc.exchangeTotal ? 'Balance to pay' : 'Total', 'B', 11);
   p.tFit(L, y, amountInWords(doc.grand), 'B', 8.5, cols[4] - L - 8);
 
   // Footer

@@ -1,5 +1,5 @@
 import { calcBill, calcEstimate, type ItemInput, type Metal, type PaymentMode } from './calc';
-import type { BillDoc, BillPayment, Buyer, EstimateCustomer, EstimateDoc, Settings, ShopSnapshot } from './types';
+import type { BillDoc, BillPayment, Buyer, EstimateCustomer, EstimateDoc, ExchangeLine, Settings, ShopSnapshot } from './types';
 
 export const DEFAULT_SETTINGS: Settings = {
   shopName: 'S.R. Jewellers',
@@ -106,10 +106,12 @@ export function buildEstimateDoc(args: {
   shop: ShopSnapshot;
   customer: EstimateCustomer;
   items: ItemInput[];
+  exchanges?: ExchangeLine[];
   paymentMode: PaymentMode;
 }): EstimateDoc {
   const items = args.items.map((it) => ({ ...it, description: printedDescription(it.description, it.metal), hsn: '' }));
-  const c = calcEstimate(items);
+  const exchanges = (args.exchanges ?? []).filter((x) => x.amount > 0).map((x) => ({ description: x.description.trim(), amount: x.amount }));
+  const c = calcEstimate(items, exchanges.map((x) => x.amount));
   return {
     estimateNo: args.estimateNo,
     date: args.date,
@@ -122,6 +124,8 @@ export function buildEstimateDoc(args: {
     items: c.items,
     totalWeightMg: c.totalWeightMg,
     subtotal: c.subtotal,
+    exchanges,
+    exchangeTotal: c.exchangeTotal,
     roundOff: c.roundOff,
     grand: c.grand,
     paymentMode: args.paymentMode,

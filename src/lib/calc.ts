@@ -158,21 +158,26 @@ export interface EstimateCalc {
   totalWeightMg: number;
   /** Σ (metal value + making) */
   subtotal: number;
+  /** old jewellery taken in exchange (money only) */
+  exchangeTotal: number;
   roundOff: number;
-  /** subtotal rounded to the nearest rupee (half up) */
+  /** what the customer pays: (subtotal − exchange) rounded to the nearest rupee (half up) */
   grand: number;
 }
 
-/** Estimate (no GST): item amounts added up and rounded to the rupee. */
-export function calcEstimate(items: ItemInput[]): EstimateCalc {
+/** Estimate (no GST): item amounts added up, old-jewellery exchange taken off, rounded to the rupee. */
+export function calcEstimate(items: ItemInput[], exchangeAmounts: number[] = []): EstimateCalc {
   const calc = items.map(calcItem);
   const subtotal = calc.reduce((s, i) => s + i.metalValue + i.makingAmount, 0);
-  const grand = Number(divRoundHalfUp(BigInt(subtotal), 100n) * 100n);
+  const exchangeTotal = exchangeAmounts.reduce((s, a) => s + a, 0);
+  const net = subtotal - exchangeTotal;
+  const grand = Number(divRoundHalfUp(BigInt(net), 100n) * 100n);
   return {
     items: calc,
     totalWeightMg: calc.reduce((s, i) => s + i.weightMg, 0),
     subtotal,
-    roundOff: grand - subtotal,
+    exchangeTotal,
+    roundOff: grand - net,
     grand,
   };
 }
