@@ -164,6 +164,7 @@ table.list tr.cancelled td { color: var(--muted); }
 .panel-head .rm { margin-left: auto; }
 .panel-no { font-size: 1.15rem; }
 .panel-lines { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.edit-log { border-top: 1px dashed var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 2px; }
 .panel-cancel { margin-top: 8px; align-self: flex-start; border-color: var(--danger); }
 
 table.list { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }

@@ -4,10 +4,13 @@ import {
   cancelEstimate,
   cancelInvoice,
   daySummaries,
+  estimateEdits,
   getEstimateDoc,
   getInvoiceDoc,
   listRecords,
   summaryRecords,
+  updateEstimateCustomer,
+  type FieldEdit,
   type RecordFilter,
   type RecordKind,
   type RecordRow,
@@ -15,7 +18,7 @@ import {
 } from '../lib/api';
 import { fmtBillDate, todayISO } from '../lib/fy';
 import { fmtMoney, fmtWeight } from '../lib/money';
-import { makeEstimatePdf, makePdf, openCopy, openEstimate, printPdf } from '../lib/output';
+import { makeEstimatePdf, makePdf, openCopy, openEstimate, printPdf, saveEstimatePdf } from '../lib/output';
 import { fmtDayHeader, groupByDate, PAGE_SIZE, presetRange, PRESETS, type Preset } from '../lib/records';
 import { Modal } from '../components/Modal';
 import type { BillDoc, EstimateDoc, Settings } from '../lib/types';
@@ -47,6 +50,8 @@ export function OldBills({ settings }: { settings: Settings }) {
   const [days, setDays] = useState<Map<string, { n: number; total: number }>>(new Map());
   const [selected, setSelected] = useState(0);
   const [panel, setPanel] = useState<RecordRow | null>(null);
+  const [panelVersion, setPanelVersion] = useState(0);
+  const [editing, setEditing] = useState<RecordRow | null>(null);
   const [cancelling, setCancelling] = useState<RecordRow | null>(null);
   const [reason, setReason] = useState('');
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -115,10 +120,20 @@ export function OldBills({ settings }: { settings: Settings }) {
       backupNow().catch(() => {});
     });
 
+  /** After a customer correction: refresh the list and re-open the panel with the new details. */
+  const afterEdit = async (r: RecordRow, changed: number) => {
+    setEditing(null);
+    if (!changed) return;
+    setMsg({ kind: 'ok', text: `Customer corrected on ${r.no}. The estimate PDF was updated.` });
+    await load();
+    setPanel((p) => (p && p.kind === r.kind && p.id === r.id ? { ...p } : p));
+    setPanelVersion((v) => v + 1);
+  };
+
   // Keyboard: ↑/↓ move through rows, Enter opens the panel, Esc closes it.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (cancelling) return;
+      if (cancelling || editing) return;
       if (e.key === 'Escape' && panel) {
         e.preventDefault();
         setPanel(null);
@@ -135,13 +150,18 @@ export function OldBills({ settings }: { settings: Settings }) {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [rows, selected, panel, cancelling]);
+  }, [rows, selected, panel, cancelling, editing]);
 
   // keep the selected row in view; while the panel is open, it follows the selection
   useEffect(() => {
     listRef.current?.querySelector(`[data-row="${selected}"]`)?.scrollIntoView({ block: 'nearest' });
     if (panel && rows[selected] && (rows[selected].kind !== panel.kind || rows[selected].id !== panel.id)) setPanel(rows[selected]);
   }, [selected]);
+  useEffect(() => {
+    if (!panel) return;
+    const fresh = rows.find((r) => r.kind === panel.kind && r.id === panel.id);
+    if (fresh && (fresh.name !== panel.name || fresh.mobile !== panel.mobile)) setPanel(fresh);
+  }, [rows]);
 
   const groups = groupByDate(rows);
   let flatIndex = -1;
@@ -301,15 +321,18 @@ export function OldBills({ settings }: { settings: Settings }) {
 
       {panel && (
         <RecordPanel
-          key={panel.kind + panel.id}
+          key={panel.kind + panel.id + ':' + panelVersion}
           record={panel}
           settings={settings}
           busy={busy}
           run={run}
           onClose={() => setPanel(null)}
           onCancel={() => setCancelling(panel)}
+          onEdit={() => setEditing(panel)}
         />
       )}
+
+      {editing && <EditCustomerModal record={editing} settings={settings} onClose={(changed) => afterEdit(editing, changed)} />}
 
       {cancelling && (
         <Modal title={`Cancel ${KIND_LABEL[cancelling.kind].toLowerCase()} ${cancelling.no}?`} onClose={() => setCancelling(null)}>
@@ -351,6 +374,7 @@ function RecordPanel({
   run,
   onClose,
   onCancel,
+  onEdit,
 }: {
   record: RecordRow;
   settings: Settings;
@@ -358,9 +382,14 @@ function RecordPanel({
   run: (fn: () => Promise<void>) => Promise<void>;
   onClose: () => void;
   onCancel: () => void;
+  onEdit: () => void;
 }) {
   const [data, setData] = useState<{ bill?: BillDoc; est?: EstimateDoc; logo: string } | null>(null);
   const [err, setErr] = useState('');
+  const [edits, setEdits] = useState<(FieldEdit & { edited_at: string })[]>([]);
+  useEffect(() => {
+    if (record.kind === 'EST') estimateEdits(record.id).then(setEdits).catch(() => {});
+  }, [record.kind, record.id]);
   useEffect(() => {
     (record.kind === 'BILL'
       ? getInvoiceDoc(record.id).then((r) => ({ bill: r.doc, logo: r.logo }))
@@ -472,6 +501,21 @@ function RecordPanel({
           {isBill ? 'Store copy' : 'Open PDF'}
         </button>
       </div>
+      {!isBill && record.status === 'ACTIVE' && (
+        <button className="btn" disabled={!doc || busy} onClick={onEdit} style={{ alignSelf: 'flex-start' }}>
+          Edit customer…
+        </button>
+      )}
+      {edits.length > 0 && (
+        <div className="edit-log">
+          <div className="hint">Customer corrected (not printed)</div>
+          {edits.map((e, i) => (
+            <div key={i} className="hint">
+              {e.edited_at.slice(0, 16)} · {FIELD_LABEL[e.field] ?? e.field}: “{e.old_value || '—'}” → “{e.new_value || '—'}”
+            </div>
+          ))}
+        </div>
+      )}
       {isBill && <div className="hint">GST bills can't be edited. Cancel and make a new bill.</div>}
       {record.status === 'ACTIVE' && (
         <button className="btn danger panel-cancel" disabled={busy} onClick={onCancel}>
@@ -479,5 +523,74 @@ function RecordPanel({
         </button>
       )}
     </aside>
+  );
+}
+
+const FIELD_LABEL: Record<string, string> = { name: 'Name', mobile: 'Mobile', otherMobile: 'Other mobile' };
+
+/** Correct the customer on an estimate (estimates only; GST bills stay locked). */
+function EditCustomerModal({ record, settings, onClose }: { record: RecordRow; settings: Settings; onClose: (changed: number) => void }) {
+  const [name, setName] = useState(record.name === 'Cash' ? '' : record.name);
+  const [mobile, setMobile] = useState(record.mobile ?? '');
+  const [other, setOther] = useState(record.other_mobile ?? '');
+  const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const digits = (v: string) => v.replace(/\D/g, '').slice(0, 10);
+
+  const save = async () => {
+    setErr('');
+    if (mobile && mobile.length !== 10) return setErr('Mobile number must be 10 digits.');
+    if (other && other.length !== 10) return setErr('Other mobile must be 10 digits.');
+    setSaving(true);
+    try {
+      const changed = await updateEstimateCustomer(record.id, name, mobile, other);
+      if (changed.length) {
+        // re-create the PDF in the bills folder with the corrected customer, then back up
+        const { doc, logo } = await getEstimateDoc(record.id);
+        await saveEstimatePdf(doc, logo, settings.billsFolder).catch(() => {});
+        backupNow().catch(() => {});
+      }
+      onClose(changed.length);
+    } catch (e) {
+      setErr(String(e));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title={`Edit customer on ${record.no}`} onClose={() => onClose(0)}>
+      <div className="hint">Only the customer's name and mobile numbers can be corrected. Items, amounts and date stay as saved.</div>
+      <form
+        className="stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
+      >
+        <label className="field">
+          Name
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Leave empty for “Cash”" />
+        </label>
+        <div className="row">
+          <label className="field grow">
+            Mobile
+            <input inputMode="numeric" value={mobile} onChange={(e) => setMobile(digits(e.target.value))} />
+          </label>
+          <label className="field grow">
+            Other mobile
+            <input inputMode="numeric" value={other} onChange={(e) => setOther(digits(e.target.value))} />
+          </label>
+        </div>
+        {err && <div className="alert error">{err}</div>}
+        <div className="actions">
+          <button type="button" className="btn" onClick={() => onClose(0)}>
+            Cancel
+          </button>
+          <button type="submit" className="btn primary" disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

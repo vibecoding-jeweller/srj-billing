@@ -458,3 +458,19 @@ export async function customerHistory(id: number): Promise<RecordRow[]> {
     [id],
   );
 }
+
+// ---------- estimate customer correction (estimates only; GST bills stay locked) ----------
+
+export interface FieldEdit {
+  field: string;
+  old_value: string;
+  new_value: string;
+}
+
+/** Correct the name / mobiles on an active estimate. Returns what changed (written to the audit trail). */
+export const updateEstimateCustomer = (id: number, name: string, mobile: string, otherMobile: string) =>
+  invoke<FieldEdit[]>('update_estimate_customer', { id, name, mobile, otherMobile });
+
+/** Audit trail of customer corrections on an estimate, oldest first. */
+export const estimateEdits = (id: number) =>
+  select<FieldEdit & { edited_at: string }>('SELECT field, old_value, new_value, edited_at FROM estimate_edits WHERE estimate_id = ?1 ORDER BY id', [id]);

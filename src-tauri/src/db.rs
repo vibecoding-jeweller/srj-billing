@@ -188,11 +188,52 @@ WHEN NOT (OLD.status = 'ACTIVE' AND NEW.status = 'CANCELLED'
 BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited, only cancelled'); END;
 "#;
 
+/// Version 3 (FIXES-PLAN step 2): an estimate's customer (name / mobiles) may be corrected, with an audit trail.
+/// Everything else on an estimate stays locked, and GST invoices are not touched.
+const MIGRATION_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS estimate_edits (
+  id INTEGER PRIMARY KEY,
+  estimate_id INTEGER NOT NULL REFERENCES estimates(id),
+  field TEXT NOT NULL,
+  old_value TEXT NOT NULL,
+  new_value TEXT NOT NULL,
+  edited_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS estimate_edits_estimate ON estimate_edits(estimate_id);
+-- the audit trail itself can never be changed
+CREATE TRIGGER IF NOT EXISTS estimate_edits_no_update BEFORE UPDATE ON estimate_edits
+BEGIN SELECT RAISE(ABORT, 'The edit history cannot be changed'); END;
+CREATE TRIGGER IF NOT EXISTS estimate_edits_no_delete BEFORE DELETE ON estimate_edits
+BEGIN SELECT RAISE(ABORT, 'The edit history cannot be changed'); END;
+
+DROP TRIGGER IF EXISTS estimates_only_cancel;
+CREATE TRIGGER estimates_only_cancel BEFORE UPDATE ON estimates
+WHEN NOT (
+  -- everything except status, customer and cancel fields is identical
+  NEW.estimate_no IS OLD.estimate_no AND NEW.fy IS OLD.fy AND NEW.seq IS OLD.seq AND NEW.date IS OLD.date
+  AND NEW.shop_snapshot IS OLD.shop_snapshot AND NEW.subtotal IS OLD.subtotal AND NEW.round_off IS OLD.round_off
+  AND NEW.grand_total IS OLD.grand_total AND NEW.payment_mode IS OLD.payment_mode AND NEW.created_at IS OLD.created_at
+  AND NEW.exchange_total IS OLD.exchange_total
+  AND (
+    -- cancel: ACTIVE -> CANCELLED, customer unchanged
+    (OLD.status = 'ACTIVE' AND NEW.status = 'CANCELLED'
+      AND NEW.customer_id IS OLD.customer_id AND NEW.customer_snapshot IS OLD.customer_snapshot)
+    OR
+    -- correct the customer of an active estimate; nothing else
+    (OLD.status = 'ACTIVE' AND NEW.status = 'ACTIVE'
+      AND NEW.cancel_reason IS OLD.cancel_reason AND NEW.cancelled_at IS OLD.cancelled_at)
+  ))
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited, only cancelled (the customer name and mobile can be corrected)'); END;
+"#;
+
 /// Brings an older database up to date, one version at a time, each step in a transaction.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 2 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_V2} PRAGMA user_version = 2; COMMIT;"))?;
+    }
+    if version < 3 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V3} PRAGMA user_version = 3; COMMIT;"))?;
     }
     Ok(())
 }
@@ -529,6 +570,89 @@ pub fn cancel_estimate(conn: &Connection, id: i64, reason: &str) -> rusqlite::Re
     )
 }
 
+#[derive(Serialize, Debug, PartialEq)]
+pub struct FieldEdit {
+    pub field: String,
+    pub old_value: String,
+    pub new_value: String,
+}
+
+fn valid_mobile(m: &str) -> bool {
+    m.is_empty() || (m.len() == 10 && m.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Corrects the customer on an ACTIVE estimate: snapshot, linked customer and an audit row per changed field,
+/// all in one transaction. Returns the fields that changed (empty if nothing did).
+pub fn update_estimate_customer(
+    conn: &mut Connection,
+    id: i64,
+    name: &str,
+    mobile: &str,
+    other_mobile: &str,
+) -> Result<Vec<FieldEdit>, String> {
+    let name = name.trim();
+    let mobile = mobile.trim();
+    let other_mobile = other_mobile.trim();
+    if !valid_mobile(mobile) {
+        return Err("Mobile number must be 10 digits.".into());
+    }
+    if !valid_mobile(other_mobile) {
+        return Err("Other mobile number must be 10 digits.".into());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    let (status, snapshot): (String, String) = tx
+        .query_row("SELECT status, customer_snapshot FROM estimates WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("Estimate not found.")?;
+    if status != "ACTIVE" {
+        return Err("Only active estimates can be edited.".into());
+    }
+    let mut snap: Value = serde_json::from_str(&snapshot).unwrap_or_else(|_| Value::Object(Map::new()));
+    let printed_name = if name.is_empty() { "Cash" } else { name };
+    let mut edits = Vec::new();
+    for (key, new) in [("name", printed_name), ("mobile", mobile), ("otherMobile", other_mobile)] {
+        let old = snap.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if old != new {
+            edits.push(FieldEdit { field: key.into(), old_value: old, new_value: new.into() });
+            snap[key] = Value::from(new);
+        }
+    }
+    if edits.is_empty() {
+        return Ok(edits);
+    }
+    // Link to the customer with this mobile (created if new); no mobile means no linked customer.
+    let customer_id: Option<i64> = if mobile.is_empty() {
+        None
+    } else {
+        let real_name = if printed_name == "Cash" { "" } else { printed_name };
+        tx.execute(
+            "INSERT INTO customers (mobile, name, other_mobile) VALUES (?1, ?2, ?3)
+             ON CONFLICT(mobile) DO UPDATE SET
+               name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE customers.name END,
+               other_mobile = CASE WHEN excluded.other_mobile <> '' THEN excluded.other_mobile ELSE customers.other_mobile END,
+               updated_at = datetime('now','localtime')",
+            params![mobile, real_name, other_mobile],
+        )
+        .map_err(|e| e.to_string())?;
+        Some(tx.query_row("SELECT id FROM customers WHERE mobile = ?1", params![mobile], |r| r.get(0)).map_err(|e| e.to_string())?)
+    };
+    tx.execute(
+        "UPDATE estimates SET customer_snapshot = ?2, customer_id = ?3 WHERE id = ?1",
+        params![id, snap.to_string(), customer_id],
+    )
+    .map_err(|e| e.to_string())?;
+    for e in &edits {
+        tx.execute(
+            "INSERT INTO estimate_edits (estimate_id, field, old_value, new_value) VALUES (?1, ?2, ?3, ?4)",
+            params![id, e.field, e.old_value, e.new_value],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(edits)
+}
+
 pub fn cancel_invoice(conn: &Connection, id: i64, reason: &str) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE invoices SET status='CANCELLED', cancel_reason=?2, cancelled_at=datetime('now','localtime')
@@ -656,7 +780,7 @@ mod tests {
             fy: fy.into(),
             prefix: "EST".into(),
             customer: Some(EstimateCustomer { mobile: mobile.into(), name: name.into(), other_mobile: "".into() }),
-            customer_snapshot: json!({"name": name}),
+            customer_snapshot: json!({"name": name, "mobile": mobile, "otherMobile": ""}),
             shop_snapshot: json!({"name": "S.R. Jewellers"}),
             logo: None,
             subtotal: 8635704,
@@ -737,7 +861,7 @@ mod tests {
         init(&c).unwrap();
         init(&c).unwrap(); // running again is harmless
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
         let rows = select(&c, "SELECT name, other_mobile, notes FROM customers", &[]).unwrap();
         assert_eq!(rows[0]["name"], "Shruti");
         assert_eq!(rows[0]["other_mobile"], "");
@@ -753,5 +877,95 @@ mod tests {
         save_estimate(&mut c, &e).unwrap();
         let rows = select(&c, "SELECT other_mobile FROM customers", &[]).unwrap();
         assert_eq!(rows[0]["other_mobile"], "9720275804");
+    }
+
+    #[test]
+    fn estimate_customer_can_be_corrected_with_audit_trail() {
+        let mut c = mem();
+        let e = save_estimate(&mut c, &estimate("2026-10-08", "26-27", "9027515504", "Lakhmichand")).unwrap();
+        let edits = update_estimate_customer(&mut c, e.id, "Lakhmichand Sharma", "9027515504", "9720275804").unwrap();
+        assert_eq!(
+            edits.iter().map(|x| x.field.as_str()).collect::<Vec<_>>(),
+            vec!["name", "otherMobile"]
+        );
+        let row = select(&c, "SELECT customer_snapshot, customer_id FROM estimates WHERE id = ?1", &[e.id.into()]).unwrap();
+        let snap: Value = serde_json::from_str(row[0]["customer_snapshot"].as_str().unwrap()).unwrap();
+        assert_eq!(snap["name"], "Lakhmichand Sharma");
+        assert_eq!(snap["otherMobile"], "9720275804");
+        let audit = select(&c, "SELECT field, old_value, new_value FROM estimate_edits ORDER BY id", &[]).unwrap();
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0]["old_value"], "Lakhmichand");
+        assert_eq!(audit[0]["new_value"], "Lakhmichand Sharma");
+        // the linked customer follows a changed mobile
+        update_estimate_customer(&mut c, e.id, "Lakhmichand Sharma", "9000000001", "").unwrap();
+        let cust = select(&c, "SELECT c.mobile FROM estimates e JOIN customers c ON c.id = e.customer_id WHERE e.id = ?1", &[e.id.into()]).unwrap();
+        assert_eq!(cust[0]["mobile"], "9000000001");
+        assert_eq!(select(&c, "SELECT COUNT(*) AS n FROM estimate_edits", &[]).unwrap()[0]["n"], 4); // + mobile, otherMobile
+        // no change, no audit row
+        assert!(update_estimate_customer(&mut c, e.id, "Lakhmichand Sharma", "9000000001", "").unwrap().is_empty());
+        // the audit trail cannot be changed
+        assert!(c.execute("DELETE FROM estimate_edits", []).is_err());
+        assert!(c.execute("UPDATE estimate_edits SET new_value = 'x'", []).is_err());
+    }
+
+    #[test]
+    fn everything_else_on_an_estimate_stays_locked() {
+        let mut c = mem();
+        let e = save_estimate(&mut c, &estimate("2026-10-08", "26-27", "", "Cash")).unwrap();
+        for sql in [
+            "UPDATE estimates SET grand_total = 1 WHERE id = ?1",
+            "UPDATE estimates SET date = '2026-01-01' WHERE id = ?1",
+            "UPDATE estimates SET payment_mode = 'UPI' WHERE id = ?1",
+            "UPDATE estimates SET exchange_total = 5 WHERE id = ?1",
+            "UPDATE estimates SET cancel_reason = 'x' WHERE id = ?1",
+            // customer change smuggled in with another column
+            "UPDATE estimates SET customer_snapshot = '{}', subtotal = 1 WHERE id = ?1",
+            // customer change while cancelling
+            "UPDATE estimates SET status = 'CANCELLED', customer_snapshot = '{}' WHERE id = ?1",
+        ] {
+            assert!(c.execute(sql, [e.id]).is_err(), "should be blocked: {sql}");
+        }
+        assert!(c.execute("DELETE FROM estimates WHERE id = ?1", [e.id]).is_err());
+        // cancelled estimates cannot be edited at all
+        cancel_estimate(&c, e.id, "test").unwrap();
+        assert!(c.execute("UPDATE estimates SET customer_snapshot = '{\"name\":\"X\"}' WHERE id = ?1", [e.id]).is_err());
+        assert_eq!(
+            update_estimate_customer(&mut c, e.id, "X", "", "").unwrap_err(),
+            "Only active estimates can be edited."
+        );
+    }
+
+    #[test]
+    fn estimate_customer_edit_validates_mobiles() {
+        let mut c = mem();
+        let e = save_estimate(&mut c, &estimate("2026-10-08", "26-27", "", "Cash")).unwrap();
+        assert!(update_estimate_customer(&mut c, e.id, "A", "12345", "").is_err());
+        assert!(update_estimate_customer(&mut c, e.id, "A", "", "98x7001122").is_err());
+        assert_eq!(select(&c, "SELECT COUNT(*) AS n FROM estimate_edits", &[]).unwrap()[0]["n"], 0);
+    }
+
+    #[test]
+    fn gst_invoices_stay_fully_locked() {
+        let mut c = mem();
+        let i = save_invoice(&mut c, &invoice("2026-10-08", "26-27")).unwrap();
+        assert!(c.execute("UPDATE invoices SET buyer_snapshot = '{}' WHERE id = ?1", [i.id]).is_err());
+        assert!(c.execute("UPDATE invoices SET customer_id = NULL WHERE id = ?1", [i.id]).is_err());
+        assert!(c.execute("DELETE FROM invoices WHERE id = ?1", [i.id]).is_err());
+    }
+
+    #[test]
+    fn upgrades_a_version_2_database_without_losing_data() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(&format!("{MIGRATION_V2} PRAGMA user_version = 2;")).unwrap();
+        let e = save_estimate(&mut c, &estimate("2026-10-08", "26-27", "9027515504", "Lakhmichand")).unwrap();
+        // version 2 does not allow a customer correction
+        assert!(c.execute("UPDATE estimates SET customer_snapshot = '{}' WHERE id = ?1", [e.id]).is_err());
+        init(&c).unwrap();
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 3);
+        assert_eq!(select(&c, "SELECT estimate_no FROM estimates", &[]).unwrap()[0]["estimate_no"], "EST/26-27/001");
+        update_estimate_customer(&mut c, e.id, "Lakhmichand Sharma", "9027515504", "").unwrap();
+        assert!(c.execute("UPDATE estimates SET grand_total = 1 WHERE id = ?1", [e.id]).is_err());
     }
 }

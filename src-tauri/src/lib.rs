@@ -63,6 +63,18 @@ fn cancel_estimate(state: State<AppState>, id: i64, reason: String) -> CmdResult
 }
 
 #[tauri::command]
+fn update_estimate_customer(
+    state: State<AppState>,
+    id: i64,
+    name: String,
+    mobile: String,
+    other_mobile: String,
+) -> CmdResult<Vec<db::FieldEdit>> {
+    let mut conn = state.conn.lock().map_err(err)?;
+    db::update_estimate_customer(&mut conn, id, &name, &mobile, &other_mobile)
+}
+
+#[tauri::command]
 fn write_file(path: String, data_b64: String) -> CmdResult<()> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64).map_err(err)?;
     let p = PathBuf::from(&path);
@@ -191,6 +203,7 @@ pub fn run() {
             cancel_invoice,
             save_estimate,
             cancel_estimate,
+            update_estimate_customer,
             write_file,
             file_exists,
             default_bills_folder,
