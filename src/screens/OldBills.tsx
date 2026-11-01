@@ -1,40 +1,93 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   backupNow,
   cancelEstimate,
   cancelInvoice,
+  daySummaries,
   getEstimateDoc,
   getInvoiceDoc,
   listRecords,
+  summaryRecords,
+  type RecordFilter,
   type RecordKind,
   type RecordRow,
+  type RecordsSummary,
 } from '../lib/api';
-import { fmtBillDate } from '../lib/fy';
-import { fmtMoney } from '../lib/money';
+import { fmtBillDate, todayISO } from '../lib/fy';
+import { fmtMoney, fmtWeight } from '../lib/money';
 import { makeEstimatePdf, makePdf, openCopy, openEstimate, printPdf } from '../lib/output';
+import { fmtDayHeader, groupByDate, PAGE_SIZE, presetRange, PRESETS, type Preset } from '../lib/records';
 import { Modal } from '../components/Modal';
-import type { Settings } from '../lib/types';
+import type { BillDoc, EstimateDoc, Settings } from '../lib/types';
 
 const KIND_LABEL: Record<RecordKind, string> = { BILL: 'Bill', EST: 'Estimate' };
 
+// Remembered while the app is open (so switching tabs keeps the choice); a fresh start always opens on Today.
+const remembered: { preset: Preset; from: string; to: string } = { preset: 'today', from: '', to: '' };
+
+const isTyping = (t: EventTarget | null) => {
+  const el = t as HTMLElement | null;
+  if (!el) return false;
+  if (el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') return true;
+  return el.tagName === 'INPUT' && (el as HTMLInputElement).type !== 'search' && !el.hasAttribute('data-list-search');
+};
+
 /** GST bills and estimates in one list, so every sale can be tracked. */
 export function OldBills({ settings }: { settings: Settings }) {
+  const [preset, setPreset] = useState<Preset>(remembered.preset);
+  const [customFrom, setCustomFrom] = useState(remembered.from);
+  const [customTo, setCustomTo] = useState(remembered.to);
   const [q, setQ] = useState('');
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
   const [kind, setKind] = useState<'' | RecordKind>('');
+  const [showCancelled, setShowCancelled] = useState(false);
+
   const [rows, setRows] = useState<RecordRow[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [summary, setSummary] = useState<RecordsSummary | null>(null);
+  const [days, setDays] = useState<Map<string, { n: number; total: number }>>(new Map());
+  const [selected, setSelected] = useState(0);
+  const [panel, setPanel] = useState<RecordRow | null>(null);
   const [cancelling, setCancelling] = useState<RecordRow | null>(null);
   const [reason, setReason] = useState('');
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
 
-  const load = () => listRecords({ q, from, to, kind }).then(setRows).catch((e) => setMsg({ kind: 'error', text: String(e) }));
+  useEffect(() => {
+    remembered.preset = preset;
+    remembered.from = customFrom;
+    remembered.to = customTo;
+  }, [preset, customFrom, customTo]);
+
+  const range = preset === 'custom' ? { from: customFrom, to: customTo } : presetRange(preset, todayISO());
+  const filter: RecordFilter = useMemo(
+    () => ({ q, from: range.from, to: range.to, kind, showCancelled }),
+    [q, range.from, range.to, kind, showCancelled],
+  );
+
+  const load = useCallback(async () => {
+    try {
+      const [page, sum, perDay] = await Promise.all([listRecords(filter, 0), summaryRecords(filter), daySummaries(filter)]);
+      setRows(page);
+      setHasMore(page.length === PAGE_SIZE);
+      setSummary(sum);
+      setDays(perDay);
+      setSelected(0);
+    } catch (e) {
+      setMsg({ kind: 'error', text: String(e) });
+    }
+  }, [filter]);
 
   useEffect(() => {
     const t = setTimeout(load, 150);
     return () => clearTimeout(t);
-  }, [q, from, to, kind]);
+  }, [load]);
+
+  const loadMore = async () => {
+    const page = await listRecords(filter, rows.length);
+    setRows((r) => [...r, ...page]);
+    setHasMore(page.length === PAGE_SIZE);
+  };
 
   const run = async (fn: () => Promise<void>) => {
     if (busy) return;
@@ -49,28 +102,6 @@ export function OldBills({ settings }: { settings: Settings }) {
     }
   };
 
-  const reprint = (r: RecordRow) =>
-    run(async () => {
-      if (r.kind === 'BILL') {
-        const { doc, logo } = await getInvoiceDoc(r.id);
-        await printPdf(await makePdf(doc, 'customer', logo));
-      } else {
-        const { doc, logo } = await getEstimateDoc(r.id);
-        await printPdf(await makeEstimatePdf(doc, logo));
-      }
-    });
-
-  const openPdf = (r: RecordRow) =>
-    run(async () => {
-      if (r.kind === 'BILL') {
-        const { doc, logo } = await getInvoiceDoc(r.id);
-        await openCopy(doc, logo, settings.billsFolder, 'store');
-      } else {
-        const { doc, logo } = await getEstimateDoc(r.id);
-        await openEstimate(doc, logo, settings.billsFolder);
-      }
-    });
-
   const confirmCancel = () =>
     run(async () => {
       if (!cancelling || !reason.trim()) return;
@@ -79,138 +110,206 @@ export function OldBills({ settings }: { settings: Settings }) {
       setMsg({ kind: 'ok', text: `${KIND_LABEL[cancelling.kind]} ${cancelling.no} marked CANCELLED. Its number will not be used again.` });
       setCancelling(null);
       setReason('');
+      setPanel(null);
       await load();
       backupNow().catch(() => {});
     });
 
-  // Sales totals for what is listed (cancelled ones not counted)
-  const active = rows.filter((r) => r.status === 'ACTIVE');
-  const sum = (k: RecordKind) => active.filter((r) => r.kind === k).reduce((s, r) => s + r.grand_total, 0);
-  const exchanged = active.reduce((s, r) => s + (r.exchange || 0), 0);
-  const count = (k: RecordKind) => active.filter((r) => r.kind === k).length;
+  // Keyboard: ↑/↓ move through rows, Enter opens the panel, Esc closes it.
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (cancelling) return;
+      if (e.key === 'Escape' && panel) {
+        e.preventDefault();
+        setPanel(null);
+        return;
+      }
+      if (isTyping(e.target)) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelected((i) => Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1))));
+      } else if (e.key === 'Enter' && rows[selected]) {
+        e.preventDefault();
+        setPanel(rows[selected]);
+      }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [rows, selected, panel, cancelling]);
+
+  // keep the selected row in view; while the panel is open, it follows the selection
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-row="${selected}"]`)?.scrollIntoView({ block: 'nearest' });
+    if (panel && rows[selected] && (rows[selected].kind !== panel.kind || rows[selected].id !== panel.id)) setPanel(rows[selected]);
+  }, [selected]);
+
+  const groups = groupByDate(rows);
+  let flatIndex = -1;
+  const rangeText = range.from && range.to ? (range.from === range.to ? fmtBillDate(range.from) : `${fmtBillDate(range.from)} – ${fmtBillDate(range.to)}`) : range.from ? `from ${fmtBillDate(range.from)}` : range.to ? `up to ${fmtBillDate(range.to)}` : 'all dates';
 
   return (
-    <div className="stack" style={{ maxWidth: 1400, margin: '0 auto' }}>
-      <div className="row">
-        <label className="field grow">
-          Search
-          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Name, mobile, bill or estimate no." />
-        </label>
-        <label className="field" style={{ width: 150 }}>
-          Show
-          <select value={kind} onChange={(e) => setKind(e.target.value as '' | RecordKind)}>
+    <div className={'records' + (panel ? ' with-panel' : '')}>
+      <div className="stack">
+        <div className="presets">
+          {PRESETS.map((p) => (
+            <button key={p.id} className={'chip' + (preset === p.id ? ' on' : '')} onClick={() => setPreset(p.id)}>
+              {p.label}
+            </button>
+          ))}
+          {preset === 'custom' && (
+            <span className="custom-range">
+              <input type="date" value={customFrom} max={customTo || undefined} onChange={(e) => setCustomFrom(e.target.value)} aria-label="From" />
+              <span className="hint">to</span>
+              <input type="date" value={customTo} min={customFrom || undefined} onChange={(e) => setCustomTo(e.target.value)} aria-label="To" />
+            </span>
+          )}
+        </div>
+        <div className="row" style={{ alignItems: 'center' }}>
+          <input
+            className="grow"
+            type="search"
+            data-list-search
+            autoFocus
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search name, mobile, bill or estimate no.   (↑ ↓ to move, Enter to open)"
+          />
+          <select value={kind} onChange={(e) => setKind(e.target.value as '' | RecordKind)} style={{ width: 170 }} aria-label="Show">
             <option value="">Bills + Estimates</option>
             <option value="BILL">Bills only</option>
             <option value="EST">Estimates only</option>
           </select>
-        </label>
-        <label className="field">
-          From
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-        </label>
-        <label className="field">
-          To
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        </label>
-        {(q || from || to || kind) && (
-          <button
-            className="btn"
-            onClick={() => {
-              setQ('');
-              setFrom('');
-              setTo('');
-              setKind('');
-            }}
-          >
-            Clear
-          </button>
-        )}
-      </div>
-      <div className="totals-bar">
-        {kind !== 'EST' && (
-          <span>
-            Bills ({count('BILL')}): <b>₹{fmtMoney(sum('BILL'))}</b>
-          </span>
-        )}
-        {kind !== 'BILL' && (
-          <span>
-            Estimates ({count('EST')}): <b>₹{fmtMoney(sum('EST'))}</b>
-            {exchanged > 0 && <span className="hint"> + old jewellery ₹{fmtMoney(exchanged)}</span>}
-          </span>
-        )}
-        {!kind && (
-          <span className="grand-sum">
-            Total sale: <b>₹{fmtMoney(sum('BILL') + sum('EST'))}</b>
-          </span>
-        )}
-        <span className="hint">Cancelled ones are not counted.</span>
-      </div>
-      {msg && <div className={'alert ' + msg.kind}>{msg.text}</div>}
-      <table className="list">
-        <thead>
-          <tr>
-            <th>Type</th>
-            <th>Number</th>
-            <th>Date</th>
-            <th>Customer</th>
-            <th>Mobile</th>
-            <th style={{ textAlign: 'right' }}>Total</th>
-            <th>Payment</th>
-            <th>Status</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && (
-            <tr>
-              <td colSpan={9} style={{ textAlign: 'center', color: 'var(--muted)', padding: 30 }}>
-                Nothing found.
-              </td>
-            </tr>
+          <label className="toggle">
+            <input type="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} />
+            Show cancelled
+          </label>
+        </div>
+
+        <div className="totals-bar">
+          <span className="range">{rangeText}</span>
+          {kind !== 'EST' && (
+            <span>
+              Bills ({summary?.bills.n ?? 0}) <b className="big-num">₹{fmtMoney(summary?.bills.total ?? 0)}</b>
+            </span>
           )}
-          {rows.map((r) => (
-            <tr key={r.kind + r.id} className={r.status === 'CANCELLED' ? 'cancelled' : ''}>
-              <td>
-                <span className={'badge ' + (r.kind === 'BILL' ? 'kind-bill' : 'kind-est')}>{KIND_LABEL[r.kind]}</span>
-              </td>
-              <td className="inv nowrap">
-                <b>{r.no}</b>
-              </td>
-              <td className="nowrap">{fmtBillDate(r.date)}</td>
-              <td>{r.name}</td>
-              <td>{r.mobile}</td>
-              <td className="num nowrap">₹{fmtMoney(r.grand_total)}</td>
-              <td>{r.modes}</td>
-              <td>
-                {r.status === 'ACTIVE' ? (
-                  <span className="badge ok">Active</span>
-                ) : (
-                  <span className="badge cancel" title={r.cancel_reason ?? ''}>
-                    CANCELLED
-                  </span>
-                )}
-                {r.status === 'CANCELLED' && r.cancel_reason && <div className="hint">{r.cancel_reason}</div>}
-              </td>
-              <td className="actions">
-                <div className="acts">
-                  <button className="link" disabled={busy} onClick={() => reprint(r)}>
-                    Reprint
-                  </button>
-                  <button className="link" disabled={busy} onClick={() => openPdf(r)}>
-                    {r.kind === 'BILL' ? 'Store copy' : 'Open PDF'}
-                  </button>
-                  {r.status === 'ACTIVE' && (
-                    <button className="link danger" disabled={busy} onClick={() => setCancelling(r)}>
-                      Cancel
-                    </button>
-                  )}
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length === 500 && <div className="hint">Showing the latest 500. Use search or dates to narrow down.</div>}
+          {kind !== 'BILL' && (
+            <span>
+              Estimates ({summary?.estimates.n ?? 0}) <b className="big-num">₹{fmtMoney(summary?.estimates.total ?? 0)}</b>
+              {(summary?.estimates.exchange ?? 0) > 0 && <span className="hint"> + old jewellery ₹{fmtMoney(summary!.estimates.exchange)}</span>}
+            </span>
+          )}
+          {!kind && (
+            <span className="grand-sum">
+              Total sale <b className="big-num">₹{fmtMoney((summary?.bills.total ?? 0) + (summary?.estimates.total ?? 0))}</b>
+            </span>
+          )}
+          {(summary?.cancelled ?? 0) > 0 && (
+            <span className="hint">
+              {summary!.cancelled} cancelled {showCancelled ? '(shown, not counted)' : '(hidden)'}
+            </span>
+          )}
+        </div>
+        {msg && <div className={'alert ' + msg.kind}>{msg.text}</div>}
+
+        <div className="records-list" ref={listRef}>
+          {rows.length === 0 ? (
+            <div className="empty">
+              {q ? `Nothing found for “${q}” (${rangeText}).` : preset === 'today' ? 'No sales today yet.' : `No sales for ${rangeText}.`}
+              {(q || preset !== 'custom' || customFrom || customTo) && range.from !== '' && (
+                <button
+                  className="link"
+                  onClick={() => {
+                    setPreset('custom');
+                    setCustomFrom('');
+                    setCustomTo('');
+                  }}
+                >
+                  Search all dates
+                </button>
+              )}
+            </div>
+          ) : (
+            <table className="list records-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 90 }}>Type</th>
+                  <th style={{ width: 140 }}>Number</th>
+                  <th>Customer</th>
+                  <th>Payment</th>
+                  <th style={{ textAlign: 'right', width: 140 }}>Total</th>
+                </tr>
+              </thead>
+              {groups.map((g) => {
+                const d = days.get(g.date);
+                return (
+                  <tbody key={g.date}>
+                    <tr className="day-head">
+                      <td colSpan={5}>
+                        <b>{fmtDayHeader(g.date)}</b>
+                        <span className="hint">
+                          {' · '}
+                          {d ? `${d.n} sale${d.n === 1 ? '' : 's'} · ` : ''}
+                        </span>
+                        {d && <b className="num">₹{fmtMoney(d.total)}</b>}
+                      </td>
+                    </tr>
+                    {g.rows.map((r) => {
+                      flatIndex++;
+                      const i = flatIndex;
+                      const open = panel && panel.kind === r.kind && panel.id === r.id;
+                      return (
+                        <tr
+                          key={r.kind + r.id}
+                          data-row={i}
+                          className={'clickable' + (r.status === 'CANCELLED' ? ' cancelled' : '') + (i === selected ? ' cursor' : '') + (open ? ' selected' : '')}
+                          onClick={() => {
+                            setSelected(i);
+                            setPanel(r);
+                          }}
+                        >
+                          <td>
+                            <span className={'badge ' + (r.kind === 'BILL' ? 'kind-bill' : 'kind-est')}>{KIND_LABEL[r.kind]}</span>
+                          </td>
+                          <td className="nowrap">
+                            <b>{r.no}</b>
+                          </td>
+                          <td>
+                            {r.name}
+                            {r.mobile && <span className="hint"> · {r.mobile}</span>}
+                          </td>
+                          <td>
+                            {r.status === 'CANCELLED' ? <span className="badge cancel">CANCELLED</span> : r.modes}
+                          </td>
+                          <td className="num nowrap">
+                            <span className={r.status === 'CANCELLED' ? 'struck' : ''}>₹{fmtMoney(r.grand_total)}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                );
+              })}
+            </table>
+          )}
+          {hasMore && (
+            <button className="btn load-more" onClick={loadMore}>
+              Load more
+            </button>
+          )}
+        </div>
+      </div>
+
+      {panel && (
+        <RecordPanel
+          key={panel.kind + panel.id}
+          record={panel}
+          settings={settings}
+          busy={busy}
+          run={run}
+          onClose={() => setPanel(null)}
+          onCancel={() => setCancelling(panel)}
+        />
+      )}
 
       {cancelling && (
         <Modal title={`Cancel ${KIND_LABEL[cancelling.kind].toLowerCase()} ${cancelling.no}?`} onClose={() => setCancelling(null)}>
@@ -241,5 +340,144 @@ export function OldBills({ settings }: { settings: Settings }) {
         </Modal>
       )}
     </div>
+  );
+}
+
+/** Details of one bill or estimate, with its actions. */
+function RecordPanel({
+  record,
+  settings,
+  busy,
+  run,
+  onClose,
+  onCancel,
+}: {
+  record: RecordRow;
+  settings: Settings;
+  busy: boolean;
+  run: (fn: () => Promise<void>) => Promise<void>;
+  onClose: () => void;
+  onCancel: () => void;
+}) {
+  const [data, setData] = useState<{ bill?: BillDoc; est?: EstimateDoc; logo: string } | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    (record.kind === 'BILL'
+      ? getInvoiceDoc(record.id).then((r) => ({ bill: r.doc, logo: r.logo }))
+      : getEstimateDoc(record.id).then((r) => ({ est: r.doc, logo: r.logo }))
+    )
+      .then(setData)
+      .catch((e) => setErr(String(e)));
+  }, [record.kind, record.id]);
+
+  const doc = data?.bill ?? data?.est;
+  const items = doc?.items ?? [];
+  const isBill = record.kind === 'BILL';
+
+  const reprint = () =>
+    run(async () => {
+      if (data?.bill) await printPdf(await makePdf(data.bill, 'customer', data.logo));
+      if (data?.est) await printPdf(await makeEstimatePdf(data.est, data.logo));
+    });
+  const openPdf = () =>
+    run(async () => {
+      if (data?.bill) await openCopy(data.bill, data.logo, settings.billsFolder, 'store');
+      if (data?.est) await openEstimate(data.est, data.logo, settings.billsFolder);
+    });
+
+  return (
+    <aside className="record-panel card stack">
+      <div className="panel-head">
+        <span className={'badge ' + (isBill ? 'kind-bill' : 'kind-est')}>{KIND_LABEL[record.kind]}</span>
+        <b className="panel-no">{record.no}</b>
+        {record.status === 'CANCELLED' && <span className="badge cancel">CANCELLED</span>}
+        <button className="rm" title="Close (Esc)" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <div className="hint">{fmtDayHeader(record.date)}</div>
+      {record.status === 'CANCELLED' && record.cancel_reason && <div className="alert error">Cancelled: {record.cancel_reason}</div>}
+
+      <div>
+        <b>{record.name}</b>
+        <div className="hint">{[record.mobile, data?.est?.customer.otherMobile].filter(Boolean).join(', ') || 'No mobile'}</div>
+        {data?.bill?.buyer.address && <div className="hint">{data.bill.buyer.address}</div>}
+      </div>
+
+      {err && <div className="alert error">{err}</div>}
+      {!doc && !err && <div className="hint">Loading…</div>}
+      {doc && (
+        <>
+          <table className="list compact">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th style={{ textAlign: 'right' }}>Weight</th>
+                <th style={{ textAlign: 'right' }}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, i) => (
+                <tr key={i}>
+                  <td>{it.description}</td>
+                  <td className="num nowrap">{fmtWeight(it.weightMg)} g</td>
+                  <td className="num nowrap">₹{fmtMoney(it.metalValue + it.makingAmount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="panel-lines">
+            {data?.bill && (
+              <>
+                <span>Taxable</span>
+                <span className="num">₹{fmtMoney(data.bill.taxable)}</span>
+                <span>CGST + SGST</span>
+                <span className="num">₹{fmtMoney(data.bill.cgst + data.bill.sgst)}</span>
+              </>
+            )}
+            {data?.est?.exchanges.map((x, i) => (
+              <span key={i} style={{ display: 'contents' }}>
+                <span>Less: old jewellery{x.description ? ` (${x.description})` : ''}</span>
+                <span className="num">(-)₹{fmtMoney(x.amount)}</span>
+              </span>
+            ))}
+            <span>
+              <b>{data?.est?.exchangeTotal ? 'Balance paid' : 'Total'}</b>
+            </span>
+            <span className="num">
+              <b className={record.status === 'CANCELLED' ? 'struck' : ''}>₹{fmtMoney(record.grand_total)}</b>
+            </span>
+          </div>
+
+          <div>
+            <div className="hint">Payment</div>
+            {data?.bill
+              ? data.bill.payments.map((p, i) => (
+                  <div key={i}>
+                    {p.mode} ₹{fmtMoney(p.amount)}
+                    {p.referenceNo && <span className="hint"> · Ref {p.referenceNo}</span>}
+                  </div>
+                ))
+              : data?.est && <div>{data.est.paymentMode}</div>}
+          </div>
+        </>
+      )}
+
+      <div className="row">
+        <button className="btn primary" disabled={!doc || busy} onClick={reprint}>
+          Reprint
+        </button>
+        <button className="btn" disabled={!doc || busy} onClick={openPdf}>
+          {isBill ? 'Store copy' : 'Open PDF'}
+        </button>
+      </div>
+      {isBill && <div className="hint">GST bills can't be edited. Cancel and make a new bill.</div>}
+      {record.status === 'ACTIVE' && (
+        <button className="btn danger panel-cancel" disabled={busy} onClick={onCancel}>
+          Cancel this {KIND_LABEL[record.kind].toLowerCase()}…
+        </button>
+      )}
+    </aside>
   );
 }

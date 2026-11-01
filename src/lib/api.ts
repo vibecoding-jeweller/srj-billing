@@ -4,6 +4,7 @@ import type { MakingType, Metal, PaymentMode } from './calc';
 import { DEFAULT_SETTINGS } from './bill';
 import type { BillDoc, Buyer, DailyRates, EstimateCustomer, EstimateDoc, Settings, ShopSnapshot } from './types';
 import defaultLogoUrl from '../assets/logo.png?url';
+import { daySummaryQuery, foldSummary, listRecordsQuery, summaryQuery, type RecordFilter, type RecordKind, type RecordsSummary } from './records';
 
 type Row = Record<string, unknown>;
 
@@ -152,7 +153,7 @@ export const saveInvoice = (invoice: NewInvoicePayload) =>
 
 export const cancelInvoice = (id: number, reason: string) => invoke<number>('cancel_invoice', { id, reason });
 
-export type RecordKind = 'BILL' | 'EST';
+export type { RecordKind, RecordFilter, RecordsSummary } from './records';
 
 /** One row in Old Bills: a GST bill or an estimate. */
 export interface RecordRow {
@@ -162,6 +163,7 @@ export interface RecordRow {
   date: string;
   name: string;
   mobile: string;
+  other_mobile?: string;
   grand_total: number;
   status: 'ACTIVE' | 'CANCELLED';
   cancel_reason: string | null;
@@ -170,44 +172,23 @@ export interface RecordRow {
   exchange: number;
 }
 
-/** Bills and estimates together, newest first, with the same filters applied to both. */
-export async function listRecords(f: { q: string; from: string; to: string; kind: '' | RecordKind }): Promise<RecordRow[]> {
-  const where: string[] = [];
-  const args: unknown[] = [];
-  if (f.q.trim()) {
-    const like = `%${f.q.trim()}%`;
-    args.push(like);
-    where.push(`(no LIKE ?${args.length} OR name LIKE ?${args.length} OR mobile LIKE ?${args.length} OR other_mobile LIKE ?${args.length})`);
-  }
-  if (f.from) {
-    args.push(f.from);
-    where.push(`date >= ?${args.length}`);
-  }
-  if (f.to) {
-    args.push(f.to);
-    where.push(`date <= ?${args.length}`);
-  }
-  if (f.kind) {
-    args.push(f.kind);
-    where.push(`kind = ?${args.length}`);
-  }
-  return select<RecordRow>(
-    `SELECT kind, id, no, date, name, mobile, grand_total, status, cancel_reason, modes, exchange FROM (
-       SELECT 'BILL' AS kind, i.id, i.invoice_no AS no, i.date, i.created_at,
-         json_extract(i.buyer_snapshot,'$.name') AS name, json_extract(i.buyer_snapshot,'$.mobile') AS mobile,
-         '' AS other_mobile, i.grand_total, i.status, i.cancel_reason,
-         (SELECT group_concat(mode, ' + ') FROM payments p WHERE p.invoice_id = i.id) AS modes, 0 AS exchange
-       FROM invoices i
-       UNION ALL
-       SELECT 'EST', e.id, e.estimate_no, e.date, e.created_at,
-         json_extract(e.customer_snapshot,'$.name'), json_extract(e.customer_snapshot,'$.mobile'),
-         json_extract(e.customer_snapshot,'$.otherMobile'), e.grand_total, e.status, e.cancel_reason,
-         e.payment_mode || CASE WHEN e.exchange_total > 0 THEN ' + old jewellery' ELSE '' END, e.exchange_total
-       FROM estimates e
-     ) ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY date DESC, created_at DESC, id DESC LIMIT 500`,
-    args,
-  );
+/** One page of bills and estimates, newest first. */
+export const listRecords = (f: RecordFilter, offset = 0) => {
+  const q = listRecordsQuery(f, offset);
+  return select<RecordRow>(q.sql, q.args);
+};
+
+/** Counts and totals over the whole filter (same WHERE as the list). */
+export async function summaryRecords(f: RecordFilter): Promise<RecordsSummary> {
+  const q = summaryQuery(f);
+  return foldSummary(await select<{ kind: string; status: string; n: number; total: number; exchange: number }>(q.sql, q.args));
+}
+
+/** Sales count and total for each day in the filter, for the date headers. */
+export async function daySummaries(f: RecordFilter): Promise<Map<string, { n: number; total: number }>> {
+  const q = daySummaryQuery(f);
+  const rows = await select<{ date: string; n: number; total: number }>(q.sql, q.args);
+  return new Map(rows.map((r) => [r.date, { n: Number(r.n), total: Number(r.total) }]));
 }
 
 /** Descriptions used on earlier bills and estimates, most used first (for the description search). */
