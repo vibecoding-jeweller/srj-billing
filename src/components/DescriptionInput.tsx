@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { highlightParts, searchSuggestions } from '../lib/search';
+import { didYouMean } from '../lib/itemSales';
 
 /**
  * Description box with keyword search. Typing "ri" lists every ring; ↓/↑ to choose, Enter or click to pick.
@@ -29,6 +30,8 @@ export function DescriptionInput({
     [value, suggestions, browse],
   );
   const show = open && matches.length > 0;
+  // nudge towards the spelling already in use, so reports count one item under one name
+  const better = useMemo(() => (show ? null : didYouMean(value, suggestions)), [show, value, suggestions]);
 
   useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-i="${hi}"]`)?.scrollIntoView({ block: 'nearest' });
@@ -111,6 +114,19 @@ export function DescriptionInput({
             ↓ ↑ to choose · Enter to pick
           </li>
         </ul>
+      )}
+      {better && (
+        <button
+          type="button"
+          className="did-you-mean"
+          tabIndex={-1}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            onPick(better);
+          }}
+        >
+          Did you mean <b>{better}</b>?
+        </button>
       )}
     </div>
   );

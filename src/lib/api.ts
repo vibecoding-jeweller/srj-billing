@@ -4,7 +4,8 @@ import type { MakingType, Metal, PaymentMode } from './calc';
 import { DEFAULT_SETTINGS } from './bill';
 import type { BillDoc, Buyer, DailyRates, EstimateCustomer, EstimateDoc, Settings, ShopSnapshot } from './types';
 import defaultLogoUrl from '../assets/logo.png?url';
-import { daySummaryQuery, foldSummary, listRecordsQuery, summaryQuery, type RecordFilter, type RecordKind, type RecordsSummary } from './records';
+import { daySummaryQuery, foldSummary, listRecordsQuery, RECORDS_SOURCE, summaryQuery, type RecordFilter, type RecordKind, type RecordsSummary } from './records';
+import { descriptionsQuery, linesQuery, matchDescriptions, summarise, type ItemFilter, type ItemLine, type ItemSalesResult } from './itemSales';
 
 type Row = Record<string, unknown>;
 
@@ -474,3 +475,24 @@ export const updateEstimateCustomer = (id: number, name: string, mobile: string,
 /** Audit trail of customer corrections on an estimate, oldest first. */
 export const estimateEdits = (id: number) =>
   select<FieldEdit & { edited_at: string }>('SELECT field, old_value, new_value, edited_at FROM estimate_edits WHERE estimate_id = ?1 ORDER BY id', [id]);
+
+// ---------- reports ----------
+
+/** Item Sales: match descriptions (with spelling variants) in JS, then fetch just those item lines. */
+export async function itemSales(f: ItemFilter): Promise<ItemSalesResult> {
+  const d = descriptionsQuery(f);
+  const keep = matchDescriptions(await select<{ description: string; metal: string }>(d.sql, d.args), f.q);
+  if (!keep.length) return summarise([], []);
+  const l = linesQuery(f, [...new Set(keep.map((k) => k.description))]);
+  return summarise(await select<ItemLine>(l.sql, l.args), keep);
+}
+
+/** One bill or estimate as an Old Bills row (for opening its panel from elsewhere). */
+export async function getRecord(kind: RecordKind, id: number): Promise<RecordRow | null> {
+  const rows = await select<RecordRow>(
+    `SELECT kind, id, no, date, name, mobile, other_mobile, grand_total, status, cancel_reason, modes, exchange
+     FROM ${RECORDS_SOURCE} WHERE kind = ?1 AND id = ?2`,
+    [kind, id],
+  );
+  return rows[0] ?? null;
+}

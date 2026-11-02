@@ -366,8 +366,8 @@ export function OldBills({ settings }: { settings: Settings }) {
   );
 }
 
-/** Details of one bill or estimate, with its actions. */
-function RecordPanel({
+/** Details of one bill or estimate, with its actions. Without onCancel/onEdit (e.g. from Reports) it only views and reprints. */
+export function RecordPanel({
   record,
   settings,
   busy,
@@ -381,8 +381,8 @@ function RecordPanel({
   busy: boolean;
   run: (fn: () => Promise<void>) => Promise<void>;
   onClose: () => void;
-  onCancel: () => void;
-  onEdit: () => void;
+  onCancel?: () => void;
+  onEdit?: () => void;
 }) {
   const [data, setData] = useState<{ bill?: BillDoc; est?: EstimateDoc; logo: string } | null>(null);
   const [err, setErr] = useState('');
@@ -501,7 +501,7 @@ function RecordPanel({
           {isBill ? 'Store copy' : 'Open PDF'}
         </button>
       </div>
-      {!isBill && record.status === 'ACTIVE' && (
+      {onEdit && !isBill && record.status === 'ACTIVE' && (
         <button className="btn" disabled={!doc || busy} onClick={onEdit} style={{ alignSelf: 'flex-start' }}>
           Edit customer…
         </button>
@@ -516,8 +516,8 @@ function RecordPanel({
           ))}
         </div>
       )}
-      {isBill && <div className="hint">GST bills can't be edited. Cancel and make a new bill.</div>}
-      {record.status === 'ACTIVE' && (
+      {onCancel && isBill && <div className="hint">GST bills can't be edited. Cancel and make a new bill.</div>}
+      {onCancel && record.status === 'ACTIVE' && (
         <button className="btn danger panel-cancel" disabled={busy} onClick={onCancel}>
           Cancel this {KIND_LABEL[record.kind].toLowerCase()}…
         </button>

@@ -10,9 +10,10 @@ import { NewBill } from './screens/NewBill';
 import { Estimate } from './screens/Estimate';
 import { OldBills } from './screens/OldBills';
 import { Customers } from './screens/Customers';
+import { Reports } from './screens/Reports';
 import { SettingsScreen } from './screens/Settings';
 
-type Screen = 'new' | 'estimate' | 'old' | 'customers' | 'settings';
+type Screen = 'new' | 'estimate' | 'old' | 'customers' | 'reports' | 'settings';
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('new');
@@ -107,6 +108,9 @@ export default function App() {
           <button className={'tab' + (screen === 'customers' ? ' active' : '')} onClick={() => setScreen('customers')}>
             Customers
           </button>
+          <button className={'tab' + (screen === 'reports' ? ' active' : '')} onClick={() => setScreen('reports')}>
+            Reports
+          </button>
           <button className={'tab' + (screen === 'settings' ? ' active' : '')} onClick={() => setScreen('settings')}>
             Settings
           </button>
@@ -127,6 +131,7 @@ export default function App() {
         </div>
         {screen === 'old' && <OldBills settings={settings} />}
         {screen === 'customers' && <Customers settings={settings} />}
+        {screen === 'reports' && <Reports settings={settings} />}
         {screen === 'settings' && <SettingsScreen settings={settings} onSave={updateSettings} />}
       </main>
       {ratesOpen && (
