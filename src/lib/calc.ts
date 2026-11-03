@@ -1,12 +1,15 @@
 import { divRoundHalfUp } from './money';
 
-export type Metal = 'GOLD22' | 'GOLD18' | 'SILVER';
+export type Metal = 'GOLD22' | 'GOLD18' | 'SILVER' | 'SILVER925';
 export type MakingType = 'PCT' | 'PER_G' | 'FIXED';
+/** WEIGHT: weight × rate + making. FIXED_PRICE: qty × tag price (GST-inclusive on bills), e.g. LUXMÉ 925 pieces. */
+export type Pricing = 'WEIGHT' | 'FIXED_PRICE';
 
 export const METAL_LABEL: Record<Metal, string> = {
   GOLD22: 'Gold 22K',
   GOLD18: 'Gold 18K',
   SILVER: 'Silver',
+  SILVER925: 'Silver 925',
 };
 
 /** Rates are entered per 10 g for gold and per kg for silver. */
@@ -14,11 +17,14 @@ export const RATE_UNIT_LABEL: Record<Metal, string> = {
   GOLD22: 'per 10 g',
   GOLD18: 'per 10 g',
   SILVER: 'per kg',
+  SILVER925: 'per kg',
 };
+
+export const isSilver = (m: Metal) => m === 'SILVER' || m === 'SILVER925';
 
 /** Milligrams in one rate unit. */
 export function rateUnitMg(metal: Metal): bigint {
-  return metal === 'SILVER' ? 1_000_000n : 10_000n;
+  return isSilver(metal) ? 1_000_000n : 10_000n;
 }
 
 export interface ItemInput {
@@ -32,14 +38,28 @@ export interface ItemInput {
   makingValue: number;
   /** HSN code for this item, e.g. 7113 */
   hsn: string;
+  /** default WEIGHT */
+  pricing?: Pricing;
+  /** catalogue code, e.g. RNG0005 */
+  sku?: string;
+  /** FIXED_PRICE: number of pieces (default 1) */
+  qty?: number;
+  /** FIXED_PRICE: paise per piece, GST-inclusive on bills */
+  unitPrice?: number;
 }
 
 export interface ItemCalc extends ItemInput {
-  /** rate per gram in paise, rounded half up (display only when not exact) */
+  /** WEIGHT: rate per gram in paise, rounded half up. FIXED_PRICE: value of one piece (before GST on bills). */
   ratePerG: number;
+  /** WEIGHT: metal value. FIXED_PRICE: line value (before GST on bills, so the table adds up to the taxable value). */
   metalValue: number;
   makingAmount: number;
 }
+
+export const isFixedPrice = (it: Pick<ItemInput, 'pricing'>) => it.pricing === 'FIXED_PRICE';
+export const qtyOf = (it: Pick<ItemInput, 'qty'>) => Math.max(1, it.qty ?? 1);
+/** qty × tag price: what the customer pays for a fixed-price line. */
+export const inclusiveOf = (it: Pick<ItemInput, 'qty' | 'unitPrice'>) => qtyOf(it) * (it.unitPrice ?? 0);
 
 /** One row of the HSN-wise tax summary. */
 export interface HsnRow {
@@ -65,7 +85,11 @@ export interface BillCalc {
   roundOff: number;
 }
 
+/** One item on its own. A fixed-price item is valued at its tag price here (right for estimates); calcBill takes the GST out. */
 export function calcItem(it: ItemInput): ItemCalc {
+  if (isFixedPrice(it)) {
+    return { ...it, qty: qtyOf(it), makingType: 'FIXED', makingValue: 0, rateInput: 0, ratePerG: it.unitPrice ?? 0, metalValue: inclusiveOf(it), makingAmount: 0 };
+  }
   const unit = rateUnitMg(it.metal);
   const weight = BigInt(it.weightMg);
   const rate = BigInt(it.rateInput);
@@ -88,25 +112,66 @@ export function calcItem(it: ItemInput): ItemCalc {
 }
 
 /**
- * Tax is worked out per HSN code (taxable value of all items with that code × rate, rounded),
- * so the bill's CGST/SGST always equal the totals of the HSN summary table.
+ * GST taken out of a tag price, so the customer pays exactly the tag:
+ * tax = round2(incl × rate / (100 + rate)), CGST = round2(tax / 2), SGST = the rest.
+ */
+export function inclusiveTax(incl: number, gstRate: number) {
+  const tax = divRoundHalfUp(BigInt(incl) * BigInt(gstRate), BigInt(10_000 + gstRate));
+  const cgst = divRoundHalfUp(tax, 2n);
+  return { taxable: incl - Number(tax), tax: Number(tax), cgst: Number(cgst), sgst: Number(tax - cgst) };
+}
+
+type TaxItem = Pick<ItemCalc, 'hsn' | 'metalValue' | 'makingAmount'> & Pick<ItemInput, 'pricing' | 'qty' | 'unitPrice'>;
+
+/**
+ * Tax is worked out per HSN code, so the bill's CGST/SGST always equal the totals of the HSN summary table.
+ * Weight-priced items: taxable value of all items with that code × rate, rounded.
+ * Fixed-price items: the GST inside their tag prices (all of that code together), see inclusiveTax.
  * @param gstRate total GST in hundredths of a percent (300 = 3%), split equally into CGST and SGST.
  */
-export function hsnSummary(items: Pick<ItemCalc, 'hsn' | 'metalValue' | 'makingAmount'>[], gstRate: number): HsnRow[] {
-  const groups = new Map<string, bigint>();
+export function hsnSummary(items: TaxItem[], gstRate: number): HsnRow[] {
+  const groups = new Map<string, { weight: bigint; incl: number }>();
   for (const i of items) {
     const key = i.hsn.trim();
-    groups.set(key, (groups.get(key) ?? 0n) + BigInt(i.metalValue) + BigInt(i.makingAmount));
+    const g = groups.get(key) ?? { weight: 0n, incl: 0 };
+    if (isFixedPrice(i)) g.incl += inclusiveOf(i);
+    else g.weight += BigInt(i.metalValue) + BigInt(i.makingAmount);
+    groups.set(key, g);
   }
-  return [...groups].map(([hsn, taxable]) => {
+  return [...groups].map(([hsn, g]) => {
     // Each half rate = gstRate / 2; tax = taxable × half / 10000
-    const half = Number(divRoundHalfUp(taxable * BigInt(gstRate), 20_000n));
-    return { hsn, taxable: Number(taxable), cgst: half, sgst: half };
+    const half = Number(divRoundHalfUp(g.weight * BigInt(gstRate), 20_000n));
+    const fp = inclusiveTax(g.incl, gstRate);
+    return { hsn, taxable: Number(g.weight) + fp.taxable, cgst: half + fp.cgst, sgst: half + fp.sgst };
   });
 }
 
+/**
+ * Fixed-price lines on a bill show their value before GST. The GST is taken out per HSN code (see hsnSummary),
+ * then shared across the lines in proportion, the last line taking any odd paisa, so the lines add up exactly.
+ */
+function fixedPriceTaxable(calc: ItemCalc[], gstRate: number): ItemCalc[] {
+  const byHsn = new Map<string, number[]>();
+  calc.forEach((it, i) => {
+    if (isFixedPrice(it)) byHsn.set(it.hsn.trim(), [...(byHsn.get(it.hsn.trim()) ?? []), i]);
+  });
+  const out = [...calc];
+  for (const idx of byHsn.values()) {
+    const incl = idx.reduce((s, i) => s + inclusiveOf(calc[i]), 0);
+    const { taxable } = inclusiveTax(incl, gstRate);
+    let left = taxable;
+    idx.forEach((i, k) => {
+      const it = calc[i];
+      const line = k === idx.length - 1 ? left : incl ? Number(divRoundHalfUp(BigInt(inclusiveOf(it)) * BigInt(taxable), BigInt(incl))) : 0;
+      left -= line;
+      out[i] = { ...it, metalValue: line, ratePerG: Number(divRoundHalfUp(BigInt(line), BigInt(qtyOf(it)))) };
+    });
+  }
+  return out;
+}
+
 export function calcBill(items: ItemInput[], gstRate = 300): BillCalc {
-  const calc = items.map(calcItem);
+  const calc = fixedPriceTaxable(items.map(calcItem), gstRate);
   const summary = hsnSummary(calc, gstRate);
   const taxable = summary.reduce((s, r) => s + BigInt(r.taxable), 0n);
   const cgst = summary.reduce((s, r) => s + BigInt(r.cgst), 0n);
@@ -184,9 +249,10 @@ export function calcEstimate(items: ItemInput[], exchangeAmounts: number[] = [])
 
 /** Best metal for a picked description ("Silver Payal" → Silver), else keep the current one. */
 export function metalForDescription(desc: string, current: Metal): Metal {
-  if (/silver|chandi|चांदी/i.test(desc)) return 'SILVER';
+  if (/\b925\b/.test(desc)) return 'SILVER925';
+  if (/silver|chandi|चांदी/i.test(desc)) return current === 'SILVER925' ? current : 'SILVER';
   if (/\b18\s*(k|kt|ct)\b/i.test(desc)) return 'GOLD18';
   if (/\b22\s*(k|kt|ct)\b/i.test(desc)) return 'GOLD22';
-  if (/gold|sona|सोना/i.test(desc) && current === 'SILVER') return 'GOLD22';
+  if (/gold|sona|सोना/i.test(desc) && isSilver(current)) return 'GOLD22';
   return current;
 }

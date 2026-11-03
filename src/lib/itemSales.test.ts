@@ -179,6 +179,24 @@ describe('report over a real database', () => {
     expect(csv.startsWith('﻿Date,Type,')).toBe(true);
     expect(csv).toContain('2026-10-05,Bill,SR/26-27/');
     expect(csv).toContain(',Gold Ring,GOLD22,4.000,26000.00');
-    expect(csv.trim().split('\r\n').pop()).toBe('Total,1 bills/estimates,,,2 pieces,,7.000,45500.00');
+    expect(csv.trim().split('\r\n').pop()).toBe('Total,1 bills/estimates,,,2 pieces,,7.000,45500.00,');
+  });
+
+  it('925 pieces: exact SKU and sheet category', () => {
+    db.exec(`INSERT INTO catalogue (sku, name, category, shop_price, synced_at) VALUES ('RNG0005', 'Floral Ring', 'Rings', 149900, 'x'), ('PYL0001', 'Payal', 'Payal', 299900, 'x')`);
+    const id = Number(
+      db.prepare(`INSERT INTO invoices (invoice_no, fy, seq, date, buyer_snapshot, shop_snapshot, taxable, cgst, sgst, round_off, grand_total) VALUES ('SR/26-27/925', '26-27', 925, '2026-10-20', '{}', '{}', 0, 0, 0, 0, 0)`).run().lastInsertRowid,
+    );
+    const ins = db.prepare(
+      `INSERT INTO invoice_items (invoice_id, sl, description, metal, weight_mg, rate_input, rate_per_g, metal_value, making_type, making_value, making_amount, hsn, pricing, sku, qty, unit_price)
+       VALUES (?, ?, ?, 'SILVER925', 0, 0, 0, ?, 'FIXED', 0, 0, '7113', 'FIXED_PRICE', ?, 1, ?)`,
+    );
+    ins.run(id, 1, 'Silver 925 Floral Ring (RNG0005)', 145534, 'RNG0005', 149900);
+    ins.run(id, 2, 'Silver 925 Floral Ring (RNG0005)', 145534, 'RNG0005', 149900);
+    ins.run(id, 3, 'Silver 925 Payal (PYL0001)', 291165, 'PYL0001', 299900);
+    expect(report({ ...oct, sku: 'rng0005' }).pieces).toBe(2);
+    expect(report({ ...oct, category: 'Payal' }).pieces).toBe(1);
+    expect(report({ ...oct, metal: 'SILVER925' }).amount).toBe(145534 * 2 + 291165);
+    expect(report({ ...oct, q: 'RNG0005' }).pieces).toBe(2); // the code is part of the printed description too
   });
 });

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
-import { getRecord, itemSales, writeFile, type RecordKind, type RecordRow } from '../lib/api';
+import { catalogueCategories, getRecord, itemSales, writeFile, type RecordKind, type RecordRow } from '../lib/api';
 import { METAL_LABEL, type Metal } from '../lib/calc';
 import { fmtBillDate, todayISO } from '../lib/fy';
 import { fmtMoney, fmtWeight } from '../lib/money';
@@ -22,6 +22,11 @@ export function Reports({ settings }: { settings: Settings }) {
   const [q, setQ] = useState(remembered.q);
   const [metal, setMetal] = useState<ItemMetal>('');
   const [kind, setKind] = useState<'' | RecordKind>('');
+  const [category, setCategory] = useState('');
+  const [categories, setCategories] = useState<string[]>([]);
+  useEffect(() => {
+    catalogueCategories().then(setCategories).catch(() => {});
+  }, []);
   const [result, setResult] = useState<ItemSalesResult | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [panel, setPanel] = useState<RecordRow | null>(null);
@@ -33,7 +38,7 @@ export function Reports({ settings }: { settings: Settings }) {
   }, [preset, customFrom, customTo, q]);
 
   const range = preset === 'custom' ? { from: customFrom, to: customTo } : presetRange(preset, todayISO());
-  const filter: ItemFilter = useMemo(() => ({ q, from: range.from, to: range.to, metal, kind }), [q, range.from, range.to, metal, kind]);
+  const filter: ItemFilter = useMemo(() => ({ q, from: range.from, to: range.to, metal, kind, category }), [q, range.from, range.to, metal, kind, category]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -122,8 +127,18 @@ export function Reports({ settings }: { settings: Settings }) {
             spellCheck={false}
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Item to count, e.g. bichiya, payal, gold ring (any spelling)"
+            placeholder="Item to count, e.g. bichiya, payal, gold ring (any spelling), or a SKU like RNG0005"
           />
+          {categories.length > 0 && (
+            <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: 150 }} aria-label="925 category">
+              <option value="">All 925 tabs</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>
+                  925: {c}
+                </option>
+              ))}
+            </select>
+          )}
           <select value={metal} onChange={(e) => setMetal(e.target.value as ItemMetal)} style={{ width: 150 }} aria-label="Metal">
             {ITEM_METALS.map((m) => (
               <option key={m.id} value={m.id}>

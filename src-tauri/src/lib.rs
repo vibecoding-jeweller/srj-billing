@@ -74,6 +74,32 @@ fn update_estimate_customer(
     db::update_estimate_customer(&mut conn, id, &name, &mobile, &other_mobile)
 }
 
+/// Download the 925 catalogue JSON from the shop's Apps Script web app. Done here rather than in the
+/// webview so Google's redirects and CORS rules don't matter. Off the main thread so the window never freezes.
+#[tauri::command]
+async fn fetch_catalogue(url: String) -> CmdResult<String> {
+    let url = url.trim().to_string();
+    if !url.starts_with("https://") {
+        return Err("The catalogue URL must start with https://".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(25)).redirects(5).build();
+        let resp = agent.get(&url).call().map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("The catalogue address answered with error {code}. Check the URL in Settings."),
+            ureq::Error::Transport(t) => format!("Could not reach the catalogue (offline?): {t}"),
+        })?;
+        resp.into_string().map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+fn replace_catalogue(state: State<AppState>, items: Vec<db::CatalogueItem>, synced_at: String) -> CmdResult<usize> {
+    let mut conn = state.conn.lock().map_err(err)?;
+    db::replace_catalogue(&mut conn, &items, &synced_at)
+}
+
 #[tauri::command]
 fn write_file(path: String, data_b64: String) -> CmdResult<()> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64).map_err(err)?;
@@ -204,6 +230,8 @@ pub fn run() {
             save_estimate,
             cancel_estimate,
             update_estimate_customer,
+            fetch_catalogue,
+            replace_catalogue,
             write_file,
             file_exists,
             default_bills_folder,

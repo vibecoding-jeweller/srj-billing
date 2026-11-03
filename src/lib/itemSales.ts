@@ -160,16 +160,20 @@ export interface ItemFilter {
   to: string;
   metal: ItemMetal;
   kind: '' | RecordKind;
+  /** exact catalogue code (RNG0005); '' = any */
+  sku?: string;
+  /** a LUXMÉ sheet tab (Rings, Payal…), via the synced catalogue; '' = any */
+  category?: string;
 }
 
 /** Every item line of every ACTIVE bill and estimate. Cancelled records are never counted. Amount is before GST. */
 export const ITEMS_SOURCE = `(
   SELECT 'BILL' AS kind, i.id AS doc_id, i.invoice_no AS no, i.date, json_extract(i.buyer_snapshot,'$.name') AS name,
-    it.sl, it.description, it.metal, it.weight_mg, it.metal_value + it.making_amount AS amount
+    it.sl, it.description, it.metal, it.weight_mg, it.metal_value + it.making_amount AS amount, it.sku
   FROM invoice_items it JOIN invoices i ON i.id = it.invoice_id WHERE i.status = 'ACTIVE'
   UNION ALL
   SELECT 'EST', e.id, e.estimate_no, e.date, json_extract(e.customer_snapshot,'$.name'),
-    it.sl, it.description, it.metal, it.weight_mg, it.metal_value + it.making_amount
+    it.sl, it.description, it.metal, it.weight_mg, it.metal_value + it.making_amount, it.sku
   FROM estimate_items it JOIN estimates e ON e.id = it.estimate_id WHERE e.status = 'ACTIVE'
 )`;
 
@@ -191,6 +195,14 @@ function itemsWhere(f: ItemFilter, extra: string[] = [], args: unknown[] = []) {
     args.push(f.kind);
     where.push(`kind = ?${args.length}`);
   }
+  if (f.sku) {
+    args.push(f.sku.trim().toUpperCase());
+    where.push(`sku = ?${args.length}`);
+  }
+  if (f.category) {
+    args.push(f.category);
+    where.push(`sku IN (SELECT sku FROM catalogue WHERE category = ?${args.length})`);
+  }
   return { sql: where.length ? 'WHERE ' + where.join(' AND ') : '', args };
 }
 
@@ -206,7 +218,7 @@ export function linesQuery(f: ItemFilter, descriptions: string[]) {
   const inList = descriptions.map((_, i) => `?${i + 1}`).join(', ') || 'NULL';
   const w = itemsWhere(f, [`description IN (${inList})`], args);
   return {
-    sql: `SELECT kind, doc_id, no, date, name, sl, description, metal, weight_mg, amount FROM ${ITEMS_SOURCE} ${w.sql}
+    sql: `SELECT kind, doc_id, no, date, name, sl, description, metal, weight_mg, amount, sku FROM ${ITEMS_SOURCE} ${w.sql}
           ORDER BY date DESC, no DESC, sl`,
     args: w.args,
   };
@@ -223,6 +235,7 @@ export interface ItemLine {
   metal: string;
   weight_mg: number;
   amount: number;
+  sku: string | null;
 }
 
 export interface ItemGroup {
@@ -287,11 +300,11 @@ const grams = (mg: number) => (mg / 1000).toFixed(3);
 
 /** CSV that opens straight in Excel (with a BOM so ₹ and Hindi show correctly). One row per item, then a total. */
 export function toCsv(r: ItemSalesResult, metalLabel: (m: string) => string): string {
-  const rows: (string | number)[][] = [['Date', 'Type', 'Number', 'Customer', 'Description', 'Metal', 'Weight (g)', 'Amount before GST (Rs)']];
+  const rows: (string | number)[][] = [['Date', 'Type', 'Number', 'Customer', 'Description', 'Metal', 'Weight (g)', 'Amount before GST (Rs)', 'SKU']];
   for (const g of r.groups)
     for (const l of g.lines)
-      rows.push([l.date, l.kind === 'BILL' ? 'Bill' : 'Estimate', l.no, l.name ?? '', l.description, metalLabel(l.metal), grams(l.weight_mg), money(l.amount)]);
+      rows.push([l.date, l.kind === 'BILL' ? 'Bill' : 'Estimate', l.no, l.name ?? '', l.description, metalLabel(l.metal), grams(l.weight_mg), money(l.amount), l.sku ?? '']);
   rows.push([]);
-  rows.push(['Total', `${r.records} bills/estimates`, '', '', `${r.pieces} pieces`, '', grams(r.weightMg), money(r.amount)]);
+  rows.push(['Total', `${r.records} bills/estimates`, '', '', `${r.pieces} pieces`, '', grams(r.weightMg), money(r.amount), '']);
   return '﻿' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

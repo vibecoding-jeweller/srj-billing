@@ -1,10 +1,11 @@
 // Thin wrappers over the Rust commands (src-tauri/src/lib.rs).
 import { invoke } from '@tauri-apps/api/core';
-import type { MakingType, Metal, PaymentMode } from './calc';
+import type { ItemCalc, MakingType, Metal, PaymentMode, Pricing } from './calc';
 import { DEFAULT_SETTINGS } from './bill';
 import type { BillDoc, Buyer, DailyRates, EstimateCustomer, EstimateDoc, Settings, ShopSnapshot } from './types';
 import defaultLogoUrl from '../assets/logo.png?url';
 import { daySummaryQuery, foldSummary, listRecordsQuery, RECORDS_SOURCE, summaryQuery, type RecordFilter, type RecordKind, type RecordsSummary } from './records';
+import { looksLikeSku, syncCatalogue, type CatalogueItem, type SyncResult } from './catalogue';
 import { descriptionsQuery, linesQuery, matchDescriptions, summarise, type ItemFilter, type ItemLine, type ItemSalesResult } from './itemSales';
 
 type Row = Record<string, unknown>;
@@ -111,6 +112,61 @@ export async function lastSeqInFy(fy: string): Promise<number | null> {
   return r[0]?.s ?? null;
 }
 
+/** One item line as the Rust side saves it. */
+export interface ItemPayload {
+  description: string;
+  metal: Metal;
+  weight_mg: number;
+  rate_input: number;
+  rate_per_g: number;
+  metal_value: number;
+  making_type: MakingType;
+  making_value: number;
+  making_amount: number;
+  hsn?: string;
+  pricing: Pricing;
+  sku: string | null;
+  qty: number;
+  unit_price: number;
+}
+
+export const itemPayload = (it: ItemCalc, withHsn: boolean): ItemPayload => ({
+  description: it.description,
+  metal: it.metal,
+  weight_mg: it.weightMg,
+  rate_input: it.rateInput,
+  rate_per_g: it.ratePerG,
+  metal_value: it.metalValue,
+  making_type: it.makingType,
+  making_value: it.makingValue,
+  making_amount: it.makingAmount,
+  ...(withHsn ? { hsn: it.hsn } : {}),
+  pricing: it.pricing ?? 'WEIGHT',
+  sku: it.sku?.trim() || null,
+  qty: it.qty ?? 1,
+  unit_price: it.unitPrice ?? 0,
+});
+
+/** A saved item row back into an item (rows saved before version 0.3 read as weight-priced). */
+function rowToItem(r: Row, hsn: string): ItemCalc {
+  const n = (v: unknown) => Number(v);
+  const fixed = r.pricing === 'FIXED_PRICE';
+  return {
+    description: String(r.description),
+    metal: r.metal as Metal,
+    weightMg: n(r.weight_mg),
+    rateInput: n(r.rate_input),
+    ratePerG: n(r.rate_per_g),
+    metalValue: n(r.metal_value),
+    makingType: r.making_type as MakingType,
+    makingValue: n(r.making_value),
+    makingAmount: n(r.making_amount),
+    hsn,
+    ...(fixed ? { pricing: 'FIXED_PRICE' as const, qty: n(r.qty ?? 1), unitPrice: n(r.unit_price ?? 0) } : {}),
+    ...(r.sku ? { sku: String(r.sku) } : {}),
+  };
+}
+
 export interface NewInvoicePayload {
   date: string;
   fy: string;
@@ -134,18 +190,7 @@ export interface NewInvoicePayload {
   sgst: number;
   round_off: number;
   grand_total: number;
-  items: {
-    description: string;
-    metal: Metal;
-    weight_mg: number;
-    rate_input: number;
-    rate_per_g: number;
-    metal_value: number;
-    making_type: MakingType;
-    making_value: number;
-    making_amount: number;
-    hsn: string;
-  }[];
+  items: ItemPayload[];
   payments: { mode: PaymentMode; amount: number; reference_no: string }[];
 }
 
@@ -215,17 +260,7 @@ export interface NewEstimatePayload {
   round_off: number;
   grand_total: number;
   payment_mode: PaymentMode;
-  items: {
-    description: string;
-    metal: Metal;
-    weight_mg: number;
-    rate_input: number;
-    rate_per_g: number;
-    metal_value: number;
-    making_type: MakingType;
-    making_value: number;
-    making_amount: number;
-  }[];
+  items: ItemPayload[];
   exchanges: { description: string; amount: number }[];
 }
 
@@ -250,18 +285,7 @@ export async function getEstimateDoc(id: number): Promise<{ doc: EstimateDoc; lo
     date: String(e.date),
     shop,
     customer: JSON.parse(String(e.customer_snapshot)) as EstimateCustomer,
-    items: items.map((r) => ({
-      description: String(r.description),
-      metal: r.metal as Metal,
-      weightMg: n(r.weight_mg),
-      rateInput: n(r.rate_input),
-      ratePerG: n(r.rate_per_g),
-      metalValue: n(r.metal_value),
-      makingType: r.making_type as MakingType,
-      makingValue: n(r.making_value),
-      makingAmount: n(r.making_amount),
-      hsn: '',
-    })),
+    items: items.map((r) => rowToItem(r, '')),
     totalWeightMg: items.reduce((s, r) => s + n(r.weight_mg), 0),
     subtotal: n(e.subtotal),
     exchanges: exchanges.map((x) => ({ description: String(x.description ?? ''), amount: n(x.amount) })),
@@ -289,18 +313,7 @@ export async function getInvoiceDoc(id: number): Promise<{ doc: BillDoc; logo: s
     date: String(inv.date),
     shop,
     buyer,
-    items: items.map((r) => ({
-      description: String(r.description),
-      metal: r.metal as Metal,
-      weightMg: n(r.weight_mg),
-      rateInput: n(r.rate_input),
-      ratePerG: n(r.rate_per_g),
-      metalValue: n(r.metal_value),
-      makingType: r.making_type as MakingType,
-      makingValue: n(r.making_value),
-      makingAmount: n(r.making_amount),
-      hsn: String(r.hsn),
-    })),
+    items: items.map((r) => rowToItem(r, String(r.hsn))),
     totalWeightMg: items.reduce((s, r) => s + n(r.weight_mg), 0),
     taxable: n(inv.taxable),
     cgstRate: shop.gstRate / 2,
@@ -479,7 +492,9 @@ export const estimateEdits = (id: number) =>
 // ---------- reports ----------
 
 /** Item Sales: match descriptions (with spelling variants) in JS, then fetch just those item lines. */
-export async function itemSales(f: ItemFilter): Promise<ItemSalesResult> {
+export async function itemSales(filter: ItemFilter): Promise<ItemSalesResult> {
+  // a catalogue code searches that exact SKU
+  const f = looksLikeSku(filter.q) ? { ...filter, sku: filter.q, q: '' } : filter;
   const d = descriptionsQuery(f);
   const keep = matchDescriptions(await select<{ description: string; metal: string }>(d.sql, d.args), f.q);
   if (!keep.length) return summarise([], []);
@@ -496,3 +511,33 @@ export async function getRecord(kind: RecordKind, id: number): Promise<RecordRow
   );
   return rows[0] ?? null;
 }
+
+// ---------- 925 catalogue ----------
+
+export const fetchCatalogue = (url: string) => invoke<string>('fetch_catalogue', { url });
+export const replaceCatalogue = (items: CatalogueItem[], syncedAt: string) => invoke<number>('replace_catalogue', { items, syncedAt });
+
+export async function catalogueCategories(): Promise<string[]> {
+  const r = await select<{ c: string }>("SELECT DISTINCT category AS c FROM catalogue WHERE category <> '' ORDER BY c");
+  return r.map((x) => x.c);
+}
+
+export async function catalogueLastSynced(): Promise<string | null> {
+  const r = await select<{ at: string | null }>('SELECT MAX(synced_at) AS at FROM catalogue');
+  return r[0]?.at ?? null;
+}
+
+/** The cached catalogue, by SKU. */
+export async function loadCatalogue(): Promise<Map<string, CatalogueItem>> {
+  const rows = await select<CatalogueItem>('SELECT sku, name, category, shop_price, weight_mg, qty FROM catalogue');
+  return new Map(rows.map((r) => [r.sku, r]));
+}
+
+const localStamp = () => {
+  const d = new Date();
+  const p = (x: number) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+export const runCatalogueSync = (url: string): Promise<SyncResult> =>
+  syncCatalogue(url, { fetchText: fetchCatalogue, replace: replaceCatalogue, lastSynced: catalogueLastSynced, now: localStamp });

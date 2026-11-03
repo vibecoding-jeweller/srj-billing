@@ -6,11 +6,12 @@ import { fmtMoney, fmtMoneyShort, fmtRoundOff, fmtWeight, parsePaise } from '../
 import { buildEstimateDoc, shopSnapshot } from '../lib/bill';
 import { CASH_BLOCK_MSG, isCashBlocked } from '../lib/validate';
 import { financialYear, fmtBillDate, todayISO } from '../lib/fy';
-import { backupNow, findCustomer, getRates, openPath, saveEstimate, sha256Hex, type NewEstimatePayload } from '../lib/api';
+import { backupNow, findCustomer, getRates, openPath, saveEstimate, sha256Hex, type NewEstimatePayload, itemPayload } from '../lib/api';
 import { printPdf, saveEstimatePdf } from '../lib/output';
 import { focusNextOnEnter } from '../lib/keys';
 import { askYesNo, showError } from '../lib/dialogs';
 import { Modal } from '../components/Modal';
+import type { CatalogueItem } from '../lib/catalogue';
 import { ItemsEditor, newKey, parseRows, useItemRows } from '../components/ItemsEditor';
 import type { DailyRates, EstimateCustomer, EstimateDoc, Settings } from '../lib/types';
 
@@ -35,12 +36,14 @@ export function Estimate({
   rates,
   active,
   suggestions,
+  catalogue,
   onSaved,
 }: {
   settings: Settings;
   rates: DailyRates | null;
   active: boolean;
   suggestions: string[];
+  catalogue: Map<string, CatalogueItem>;
   onSaved: () => void;
 }) {
   const [customer, setCustomer] = useState<EstimateCustomer>(emptyCustomer);
@@ -168,17 +171,7 @@ export function Estimate({
         round_off: doc.roundOff,
         grand_total: doc.grand,
         payment_mode: doc.paymentMode,
-        items: doc.items.map((it) => ({
-          description: it.description,
-          metal: it.metal,
-          weight_mg: it.weightMg,
-          rate_input: it.rateInput,
-          rate_per_g: it.ratePerG,
-          metal_value: it.metalValue,
-          making_type: it.makingType,
-          making_value: it.makingValue,
-          making_amount: it.makingAmount,
-        })),
+        items: doc.items.map((it) => itemPayload(it, false)),
         exchanges: doc.exchanges,
       };
       const saved = await saveEstimate(payload);
@@ -271,6 +264,8 @@ export function Estimate({
           showHsn={false}
           defaultHsn={settings.hsn}
           suggestions={suggestions}
+          catalogue={catalogue}
+          taxInclusive={false}
           setRow={items.setRow}
           addRow={items.addRow}
           removeRow={items.removeRow}

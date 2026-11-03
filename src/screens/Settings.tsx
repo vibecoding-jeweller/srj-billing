@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getVersion } from '@tauri-apps/api/app';
-import { backupNow, countBillsInFy, lastSeqInFy } from '../lib/api';
+import { backupNow, catalogueLastSynced, countBillsInFy, lastSeqInFy } from '../lib/api';
+import { fmtSynced, type SyncResult } from '../lib/catalogue';
 import { financialYear, formatInvoiceNo, todayISO } from '../lib/fy';
 import { fmtPct, parseScaled } from '../lib/money';
 import { STATES, stateCode } from '../lib/states';
@@ -34,7 +35,19 @@ async function fileToPngDataUrl(file: File): Promise<string> {
   }
 }
 
-export function SettingsScreen({ settings, onSave }: { settings: Settings; onSave: (s: Settings) => Promise<void> }) {
+export function SettingsScreen({
+  settings,
+  onSave,
+  catalogueCount,
+  catalogueSync,
+  onSyncCatalogue,
+}: {
+  settings: Settings;
+  onSave: (s: Settings) => Promise<void>;
+  catalogueCount: number;
+  catalogueSync: SyncResult | null;
+  onSyncCatalogue: (url: string) => Promise<SyncResult>;
+}) {
   const [s, setS] = useState<Settings>(settings);
   const [address, setAddress] = useState(settings.addressLines.join('\n'));
   const [gst, setGst] = useState(fmtPct(settings.gstRate));
@@ -43,6 +56,19 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
   const [lastSeq, setLastSeq] = useState<number | null>(null);
   const [nextNo, setNextNo] = useState(String(settings.invoiceStart?.fy === fy ? settings.invoiceStart.seq : 1));
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+
+  const [syncing, setSyncing] = useState(false);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
+  useEffect(() => {
+    catalogueLastSynced().then(setCachedAt).catch(() => {});
+  }, [catalogueSync]);
+  const syncNow = async () => {
+    if (s.catalogueUrl.trim() !== settings.catalogueUrl) return setMsg({ kind: 'error', text: 'Save settings first, then sync.' });
+    setSyncing(true);
+    const r = await onSyncCatalogue(settings.catalogueUrl);
+    setSyncing(false);
+    setMsg(r.ok ? { kind: 'ok', text: `Catalogue synced: ${r.count} pieces.` } : { kind: 'error', text: `${r.error} Using the last copy (synced ${fmtSynced(r.syncedAt)}).` });
+  };
 
   const [version, setVersion] = useState('');
   useEffect(() => {
@@ -77,8 +103,12 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
       if (!Number.isInteger(n) || n < 1) return setMsg({ kind: 'error', text: 'Next invoice number must be a whole number, 1 or more.' });
       invoiceStart = { fy, seq: n };
     }
+    const url = s.catalogueUrl.trim();
+    if (url && !/^https:\/\/script\.google(usercontent)?\.com\//.test(url))
+      return setMsg({ kind: 'error', text: '925 catalogue URL should be the Apps Script web app link (https://script.google.com/macros/s/…/exec).' });
     const next: Settings = {
       ...s,
+      catalogueUrl: url,
       shopName: s.shopName.trim(),
       addressLines: address.split('\n').map((l) => l.trim()).filter(Boolean),
       invoicePrefix: s.invoicePrefix.toUpperCase(),
@@ -277,6 +307,31 @@ export function SettingsScreen({ settings, onSave }: { settings: Settings; onSav
               </button>
             )}
           </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <h3>925 silver catalogue (LUXMÉ sheet)</h3>
+        <div className="row">
+          <label className="field grow">
+            <span>
+              925 catalogue URL <span className="hint">— the Apps Script web app link; see scripts/luxme-catalogue.gs</span>
+            </span>
+            <input
+              value={s.catalogueUrl}
+              spellCheck={false}
+              onChange={(e) => set('catalogueUrl', e.target.value)}
+              placeholder="https://script.google.com/macros/s/…/exec"
+            />
+          </label>
+          <button type="button" className="btn" disabled={!settings.catalogueUrl || syncing} onClick={syncNow}>
+            {syncing ? 'Syncing…' : 'Sync now'}
+          </button>
+        </div>
+        <div className="hint" style={{ marginTop: 8 }}>
+          {catalogueCount > 0 ? `${catalogueCount} pieces · ` : ''}Catalogue last synced: {fmtSynced(cachedAt)}
+          {catalogueSync && !catalogueSync.ok && <span className="danger-text"> · last try failed: {catalogueSync.error}</span>}
+          {' · '}Type a SKU (e.g. RNG0005) as the description to fill in the piece. Without the catalogue, enter SKU and price by hand.
         </div>
       </section>
 

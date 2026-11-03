@@ -29,6 +29,8 @@ export interface Settings {
   billsFolder: string;
   backupFolder: string;
   declaration: string;
+  /** LUXMÉ 925 catalogue: the Apps Script web app URL ('' = not used) */
+  catalogueUrl: string;
 }
 
 /** Frozen copy of the shop details stored with each invoice. */

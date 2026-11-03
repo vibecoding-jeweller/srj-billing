@@ -1,4 +1,4 @@
-import { calcBill, calcEstimate, type ItemInput, type Metal, type PaymentMode } from './calc';
+import { calcBill, calcEstimate, isSilver, type ItemInput, type Metal, type PaymentMode } from './calc';
 import type { BillDoc, BillPayment, Buyer, EstimateCustomer, EstimateDoc, ExchangeLine, Settings, ShopSnapshot } from './types';
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS: Settings = {
   hsn: '7113',
   billsFolder: '',
   backupFolder: '',
+  catalogueUrl: '',
   declaration:
     'We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.',
 };
@@ -45,14 +46,19 @@ export function shopSnapshot(s: Settings, logoHash: string): ShopSnapshot {
   };
 }
 
-const PURITY_SUFFIX: Record<Metal, string> = { GOLD22: '22kt', GOLD18: '18kt', SILVER: '' };
+const PURITY_SUFFIX: Record<Metal, string> = { GOLD22: '22kt', GOLD18: '18kt', SILVER: '', SILVER925: '' };
 
-/** Description as printed: adds the purity ("Gold Ring" → "Gold Ring 22kt") unless already mentioned. */
-export function printedDescription(desc: string, metal: Metal): string {
-  const d = desc.trim() || (metal === 'SILVER' ? 'Silver Item' : 'Gold Item');
+/**
+ * Description as printed: adds the purity ("Gold Ring" → "Gold Ring 22kt") unless already mentioned,
+ * and the catalogue code ("Silver 925 Ring (RNG0005)").
+ */
+export function printedDescription(desc: string, metal: Metal, sku = ''): string {
+  let d = desc.trim() || (metal === 'SILVER925' ? 'Silver 925 Item' : isSilver(metal) ? 'Silver Item' : 'Gold Item');
   const suffix = PURITY_SUFFIX[metal];
-  if (!suffix || /\b(22|18)\s*(k|kt|ct|carat|karat)\b/i.test(d)) return d;
-  return `${d} ${suffix}`;
+  if (suffix && !/\b(22|18)\s*(k|kt|ct|carat|karat)\b/i.test(d)) d = `${d} ${suffix}`;
+  const code = sku.trim().toUpperCase();
+  if (code && !d.toUpperCase().includes(code)) d = `${d} (${code})`;
+  return d;
 }
 
 /** Buyer as printed/stored: name defaults to "Cash", text trimmed, PAN upper-cased. */
@@ -78,7 +84,8 @@ export function buildBillDoc(args: {
 }): BillDoc {
   const items = args.items.map((it) => ({
     ...it,
-    description: printedDescription(it.description, it.metal),
+    description: printedDescription(it.description, it.metal, it.sku),
+    sku: it.sku?.trim().toUpperCase() || undefined,
     hsn: it.hsn.trim() || args.shop.hsn,
   }));
   const c = calcBill(items, args.shop.gstRate);
@@ -109,7 +116,12 @@ export function buildEstimateDoc(args: {
   exchanges?: ExchangeLine[];
   paymentMode: PaymentMode;
 }): EstimateDoc {
-  const items = args.items.map((it) => ({ ...it, description: printedDescription(it.description, it.metal), hsn: '' }));
+  const items = args.items.map((it) => ({
+    ...it,
+    description: printedDescription(it.description, it.metal, it.sku),
+    sku: it.sku?.trim().toUpperCase() || undefined,
+    hsn: '',
+  }));
   const exchanges = (args.exchanges ?? []).filter((x) => x.amount > 0).map((x) => ({ description: x.description.trim(), amount: x.amount }));
   const c = calcEstimate(items, exchanges.map((x) => x.amount));
   return {

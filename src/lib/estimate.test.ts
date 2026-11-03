@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { calcEstimate, metalForDescription, type ItemInput } from './calc';
 import { fmtRoundOff } from './money';
-import { parseRows } from '../components/ItemsEditor';
+import { fillFromCatalogue, parseRows } from '../components/ItemsEditor';
 
 // The shop's handwritten estimate of 08-Oct-26
 const payal: ItemInput = { description: 'Silver Payal', metal: 'SILVER', weightMg: 147_000, rateInput: 2_15_000_00, makingType: 'FIXED', makingValue: 300_00, hsn: '' };
@@ -49,7 +49,7 @@ describe('metal from description', () => {
 });
 
 describe('item row checks', () => {
-  const row = { key: 1, desc: 'Silver Payal', metal: 'SILVER' as const, weight: '147', rate: '215000', makingType: 'PCT' as const, making: '300', hsn: '' };
+  const row = { key: 1, desc: 'Silver Payal', metal: 'SILVER' as const, weight: '147', rate: '215000', makingType: 'PCT' as const, making: '300', hsn: '', pricing: 'WEIGHT' as const, sku: '', qty: '1', price: '' };
   it('flags a making % above 100 (rupees typed with % selected)', () => {
     const r = parseRows([row], null, '7113');
     expect(r.itemErrors[0]).toMatch(/300% looks wrong/);
@@ -59,5 +59,21 @@ describe('item row checks', () => {
     const r = parseRows([{ ...row, makingType: 'FIXED' }], null, '7113');
     expect(r.itemErrors).toEqual([]);
     expect(r.parsed[0].calc!.makingAmount).toBe(300_00);
+  });
+  it('fixed-price rows: qty × price, weight optional, price required', () => {
+    const fp = { ...row, desc: 'Silver 925 Ring', metal: 'SILVER925' as const, pricing: 'FIXED_PRICE' as const, sku: 'rng0005', weight: '', qty: '2', price: '1,499' };
+    const ok = parseRows([fp], null, '7113');
+    expect(ok.itemErrors).toEqual([]);
+    expect(ok.validItems[0]).toMatchObject({ pricing: 'FIXED_PRICE', sku: 'RNG0005', qty: 2, unitPrice: 1_499_00, weightMg: 0, hsn: '7113' });
+    expect(ok.parsed[0].calc!.metalValue).toBe(2_998_00);
+    expect(parseRows([{ ...fp, price: '' }], null, '7113').itemErrors[0]).toMatch(/enter the price/);
+    expect(parseRows([{ ...fp, qty: '0' }], null, '7113').itemErrors[0]).toMatch(/quantity/);
+    expect(parseRows([{ ...fp, weight: 'abc' }], null, '7113').itemErrors[0]).toMatch(/weight/);
+    // a manual entry (no SKU, not in any catalogue) is never blocked
+    expect(parseRows([{ ...fp, sku: '' }], null, '7113').itemErrors).toEqual([]);
+  });
+  it('a catalogue code fills the row', () => {
+    const patch = fillFromCatalogue({ sku: 'RNG0005', name: 'Floral Ring', category: 'Rings', shop_price: 1_499_00, weight_mg: 3500, qty: 2 });
+    expect(patch).toMatchObject({ desc: 'Silver 925 Floral Ring', sku: 'RNG0005', metal: 'SILVER925', pricing: 'FIXED_PRICE', price: '1499', qty: '1', weight: '3.500' });
   });
 });

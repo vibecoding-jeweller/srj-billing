@@ -1,6 +1,6 @@
 [package]
 name = "srj-billing"
-version = "0.2.0"
+version = "0.3.0"
 description = "Offline billing for jewellers"
 edition = "2021"
 
@@ -19,6 +19,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
 base64 = "0.23.1"
+ureq = "=2.12.1"
 
 [profile.release]
 opt-level = "s"

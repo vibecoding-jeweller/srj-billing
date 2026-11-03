@@ -5,11 +5,12 @@ import { buildBillDoc, shopSnapshot } from '../lib/bill';
 import { CASH_BLOCK_MSG, checkBill, isCashBlocked, panRequired } from '../lib/validate';
 import { STATES, stateCode } from '../lib/states';
 import { financialYear, fmtBillDate, todayISO } from '../lib/fy';
-import { backupNow, findCustomer, saveInvoice, sha256Hex, openPath, type NewInvoicePayload } from '../lib/api';
+import { backupNow, findCustomer, saveInvoice, sha256Hex, openPath, type NewInvoicePayload, itemPayload } from '../lib/api';
 import { printPdf, saveBillPdfs } from '../lib/output';
 import { focusNextOnEnter } from '../lib/keys';
 import { askYesNo, showError } from '../lib/dialogs';
 import { Modal } from '../components/Modal';
+import type { CatalogueItem } from '../lib/catalogue';
 import { ItemsEditor, newKey, parseRows, useItemRows } from '../components/ItemsEditor';
 import type { BillDoc, Buyer, DailyRates, Relation, Settings } from '../lib/types';
 
@@ -45,12 +46,14 @@ export function NewBill({
   rates,
   active,
   suggestions,
+  catalogue,
   onSaved,
 }: {
   settings: Settings;
   rates: DailyRates | null;
   active: boolean;
   suggestions: string[];
+  catalogue: Map<string, CatalogueItem>;
   onSaved: () => void;
 }) {
   const [buyer, setBuyer] = useState<Buyer>(() => emptyBuyer(settings));
@@ -197,18 +200,7 @@ export function NewBill({
         sgst: doc.sgst,
         round_off: doc.roundOff,
         grand_total: doc.grand,
-        items: doc.items.map((it) => ({
-          description: it.description,
-          metal: it.metal,
-          weight_mg: it.weightMg,
-          rate_input: it.rateInput,
-          rate_per_g: it.ratePerG,
-          metal_value: it.metalValue,
-          making_type: it.makingType,
-          making_value: it.makingValue,
-          making_amount: it.makingAmount,
-          hsn: it.hsn,
-        })),
+        items: doc.items.map((it) => itemPayload(it, true)),
         payments: pays.map((p) => ({ mode: p.mode, amount: p.amount, reference_no: p.referenceNo })),
       };
       const saved = await saveInvoice(payload);
@@ -334,6 +326,8 @@ export function NewBill({
           showHsn
           defaultHsn={settings.hsn}
           suggestions={suggestions}
+          catalogue={catalogue}
+          taxInclusive={true}
           setRow={items.setRow}
           addRow={items.addRow}
           removeRow={items.removeRow}

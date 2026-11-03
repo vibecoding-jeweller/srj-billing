@@ -110,14 +110,15 @@ table.items .making select { width: 92px; flex: none; }
 .item { display: grid; grid-template-columns: 30px 1fr; column-gap: 10px; row-gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .item:first-child { padding-top: 0; }
 .item-no { grid-row: span 2; font-weight: 800; color: var(--muted); padding-top: 28px; text-align: center; }
-.item-line1 { display: grid; grid-template-columns: 1fr 170px; gap: 12px; }
-.item-line1.with-hsn { grid-template-columns: 1fr 100px 170px; }
+.item-line1 { display: grid; grid-template-columns: 1fr 150px 150px; gap: 12px; }
+.item-line1.with-hsn { grid-template-columns: 1fr 100px 150px 150px; }
 .item-line2 { display: grid; grid-template-columns: 140px 170px 240px 1fr 28px; gap: 12px; align-items: start; }
 .item-line1 input, .item-line1 select, .item-line2 input, .item-line2 select { width: 100%; }
 .item-line1 .combo input { font-size: 1.1rem; padding: 10px 12px; }
 .item-amount { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding-top: 2px; }
 .item-amount b { font-size: 1.2rem; font-variant-numeric: tabular-nums; padding-top: 6px; }
 .item-line2 .rm { margin-top: 24px; }
+.item-line2.fixed { grid-template-columns: 100px 190px 140px 150px 1fr 28px; }
 .item-line2 .making select { width: 92px; flex: none; }
 .sub-link { font-size: 0.78rem; padding: 0; align-self: flex-end; font-weight: 600; }
 span.sub { text-align: left; font-weight: 400; }
@@ -231,3 +232,4 @@ table.list.compact th, table.list.compact td { padding: 6px 8px; font-size: 0.9r
 .report-table .caret { display: inline-block; width: 14px; color: var(--muted); }
 .did-you-mean { display: block; margin-top: 4px; padding: 3px 8px; border: 1px dashed var(--accent); border-radius: 6px; background: var(--accent-soft); color: var(--ink); font-size: 0.85rem; cursor: pointer; text-align: left; }
 .did-you-mean b { color: var(--accent); }
+.danger-text { color: var(--danger); }

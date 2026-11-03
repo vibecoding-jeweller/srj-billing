@@ -69,6 +69,17 @@ describe('acceptance test', () => {
     });
     expect(mixed.items.map((i) => i.hsn)).toEqual(['7113', '7114', '7113']); // blank falls back to the default
     writeFileSync(join(root, 'out', 'mixed_hsn_customer.pdf'), await renderBillPdf(mixed, 'customer', assets));
+
+    // FIXES-PLAN 4a: Shruti's ring + one LUXMÉ RNG0005 at ₹1,499 incl. GST = ₹10,161, round off unchanged
+    const rng0005 = { description: 'Silver 925 Ring', metal: 'SILVER925' as const, weightMg: 0, rateInput: 0, makingType: 'FIXED' as const, makingValue: 0, hsn: '7113', pricing: 'FIXED_PRICE' as const, sku: 'RNG0005', qty: 1, unitPrice: 1_499_00 };
+    const with925 = buildBillDoc({ ...base, items: [...base.items, rng0005], payments: [{ mode: 'UPI', amount: 10_161_00, referenceNo: '' }] });
+    expect(with925.grand).toBe(10_161_00);
+    expect(with925.items[1].description).toBe('Silver 925 Ring (RNG0005)');
+    writeFileSync(join(root, 'out', 'with_925_customer.pdf'), await renderBillPdf(with925, 'customer', assets));
+    const only925 = buildBillDoc({ ...base, items: [rng0005, { ...rng0005, sku: 'PYL0001', description: 'Silver 925 Payal', qty: 2, unitPrice: 2_999_00, weightMg: 18_250 }], payments: [] });
+    expect(only925.roundOff).toBe(0);
+    expect(only925.grand).toBe(1_499_00 + 2 * 2_999_00);
+    writeFileSync(join(root, 'out', 'only_925_customer.pdf'), await renderBillPdf(only925, 'customer', assets));
   });
 
   it('produces the sample estimate (handwritten pad, 08-Oct-26)', async () => {
@@ -95,6 +106,16 @@ describe('acceptance test', () => {
     };
     mkdirSync(join(root, 'out'), { recursive: true });
     writeFileSync(join(root, 'out', 'sample_estimate.pdf'), await renderEstimatePdf(est, assets));
+    const est925 = buildEstimateDoc({
+      ...{ estimateNo: 'EST/26-27/003', date: '2026-11-02', shop: shopSnapshot(DEFAULT_SETTINGS, ''), paymentMode: 'Cash' as const },
+      customer: { name: 'Pooja Verma', mobile: '', otherMobile: '' },
+      items: [
+        { description: 'Silver 925 Ring', metal: 'SILVER925', weightMg: 3_500, rateInput: 0, makingType: 'FIXED', makingValue: 0, hsn: '', pricing: 'FIXED_PRICE', sku: 'RNG0005', qty: 2, unitPrice: 1_499_00 },
+        { description: 'Silver Payal', metal: 'SILVER', weightMg: 147_000, rateInput: 2_15_000_00, makingType: 'FIXED', makingValue: 300_00, hsn: '' },
+      ],
+    });
+    expect(est925.items[0].metalValue).toBe(2_998_00);
+    writeFileSync(join(root, 'out', 'estimate_925.pdf'), await renderEstimatePdf(est925, assets));
 
     // Same purchase, customer gives old silver worth ₹5,000 and pays the rest in cash
     const ex = buildEstimateDoc({

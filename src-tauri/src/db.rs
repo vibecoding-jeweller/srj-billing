@@ -226,6 +226,33 @@ WHEN NOT (
 BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited, only cancelled (the customer name and mobile can be corrected)'); END;
 "#;
 
+/// Version 4 (FIXES-PLAN step 4): fixed-price items (LUXMÉ 925 silver) and the cached SKU catalogue.
+/// New item columns have defaults, so every existing line reads as a weight-priced item, exactly as before.
+/// ADD COLUMN does not touch existing rows, so the no-update triggers on saved items stay in force.
+const MIGRATION_V4: &str = r#"
+ALTER TABLE invoice_items ADD COLUMN pricing TEXT NOT NULL DEFAULT 'WEIGHT';
+ALTER TABLE invoice_items ADD COLUMN sku TEXT;
+ALTER TABLE invoice_items ADD COLUMN qty INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE invoice_items ADD COLUMN unit_price INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE estimate_items ADD COLUMN pricing TEXT NOT NULL DEFAULT 'WEIGHT';
+ALTER TABLE estimate_items ADD COLUMN sku TEXT;
+ALTER TABLE estimate_items ADD COLUMN qty INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE estimate_items ADD COLUMN unit_price INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS invoice_items_sku ON invoice_items(sku);
+CREATE INDEX IF NOT EXISTS estimate_items_sku ON estimate_items(sku);
+
+-- last copy of the LUXMÉ sheet (shop price only); replaced whole on each successful sync
+CREATE TABLE IF NOT EXISTS catalogue (
+  sku TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL,
+  shop_price INTEGER NOT NULL,
+  weight_mg INTEGER,
+  qty INTEGER,
+  synced_at TEXT NOT NULL
+);
+"#;
+
 /// Brings an older database up to date, one version at a time, each step in a transaction.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -234,6 +261,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if version < 3 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_V3} PRAGMA user_version = 3; COMMIT;"))?;
+    }
+    if version < 4 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V4} PRAGMA user_version = 4; COMMIT;"))?;
     }
     Ok(())
 }
@@ -303,7 +333,14 @@ pub struct NewCustomer {
     pub pan: String,
 }
 
-#[derive(Deserialize, Debug)]
+fn weight_pricing() -> String {
+    "WEIGHT".into()
+}
+fn one() -> i64 {
+    1
+}
+
+#[derive(Deserialize, Debug, Default)]
 pub struct NewItem {
     pub description: String,
     pub metal: String,
@@ -316,6 +353,16 @@ pub struct NewItem {
     pub making_amount: i64,
     #[serde(default)]
     pub hsn: String,
+    /// WEIGHT or FIXED_PRICE
+    #[serde(default = "weight_pricing")]
+    pub pricing: String,
+    #[serde(default)]
+    pub sku: Option<String>,
+    #[serde(default = "one")]
+    pub qty: i64,
+    /// FIXED_PRICE: tag price per piece in paise (GST-inclusive on bills)
+    #[serde(default)]
+    pub unit_price: i64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -419,8 +466,8 @@ pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result
     for (i, it) in inv.items.iter().enumerate() {
         tx.execute(
             "INSERT INTO invoice_items (invoice_id, sl, description, metal, weight_mg, rate_input, rate_per_g,
-               metal_value, making_type, making_value, making_amount, hsn)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               metal_value, making_type, making_value, making_amount, hsn, pricing, sku, qty, unit_price)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 id,
                 (i + 1) as i64,
@@ -433,7 +480,11 @@ pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result
                 it.making_type,
                 it.making_value,
                 it.making_amount,
-                it.hsn
+                it.hsn,
+                it.pricing,
+                it.sku,
+                it.qty,
+                it.unit_price
             ],
         )?;
     }
@@ -535,8 +586,8 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
     for (i, it) in est.items.iter().enumerate() {
         tx.execute(
             "INSERT INTO estimate_items (estimate_id, sl, description, metal, weight_mg, rate_input, rate_per_g,
-               metal_value, making_type, making_value, making_amount)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+               metal_value, making_type, making_value, making_amount, pricing, sku, qty, unit_price)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 id,
                 (i + 1) as i64,
@@ -548,7 +599,11 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
                 it.metal_value,
                 it.making_type,
                 it.making_value,
-                it.making_amount
+                it.making_amount,
+                it.pricing,
+                it.sku,
+                it.qty,
+                it.unit_price
             ],
         )?;
     }
@@ -668,6 +723,46 @@ pub fn snapshot_to(conn: &Connection, dest: &std::path::Path) -> rusqlite::Resul
     Ok(())
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct CatalogueItem {
+    pub sku: String,
+    pub name: String,
+    pub category: String,
+    /// paise, GST-inclusive
+    pub shop_price: i64,
+    pub weight_mg: Option<i64>,
+    pub qty: Option<i64>,
+}
+
+/// Swap in a freshly synced catalogue, all or nothing: a failed sync never leaves a half-empty cache.
+pub fn replace_catalogue(conn: &mut Connection, items: &[CatalogueItem], synced_at: &str) -> Result<usize, String> {
+    if items.is_empty() {
+        return Err("The catalogue came back empty, so the last copy was kept.".into());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM catalogue", []).map_err(|e| e.to_string())?;
+    let mut n = 0;
+    for it in items {
+        let sku = it.sku.trim().to_uppercase();
+        if sku.is_empty() || it.shop_price <= 0 {
+            continue;
+        }
+        // the first row wins when a SKU appears twice
+        n += tx
+            .execute(
+                "INSERT OR IGNORE INTO catalogue (sku, name, category, shop_price, weight_mg, qty, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![sku, it.name.trim(), it.category.trim(), it.shop_price, it.weight_mg, it.qty, synced_at],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    if n == 0 {
+        return Err("No usable rows in the catalogue (each needs a SKU and a ShopSP), so the last copy was kept.".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,9 +803,14 @@ mod tests {
                 making_value: 1000,
                 making_amount: 76450,
                 hsn: "7113".into(),
+                ..weight_item()
             }],
             payments: vec![NewPayment { mode: "UPI".into(), amount: 866200, reference_no: "".into() }],
         }
+    }
+
+    fn weight_item() -> NewItem {
+        NewItem { pricing: "WEIGHT".into(), qty: 1, ..Default::default() }
     }
 
     fn mem() -> Connection {
@@ -861,7 +961,7 @@ mod tests {
         init(&c).unwrap();
         init(&c).unwrap(); // running again is harmless
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         let rows = select(&c, "SELECT name, other_mobile, notes FROM customers", &[]).unwrap();
         assert_eq!(rows[0]["name"], "Shruti");
         assert_eq!(rows[0]["other_mobile"], "");
@@ -958,14 +1058,106 @@ mod tests {
         let mut c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(&format!("{MIGRATION_V2} PRAGMA user_version = 2;")).unwrap();
-        let e = save_estimate(&mut c, &estimate("2026-10-08", "26-27", "9027515504", "Lakhmichand")).unwrap();
+        // an estimate as version 2 saved it (items without the version 4 columns)
+        c.execute_batch(
+            "INSERT INTO estimates (estimate_no, fy, seq, date, customer_snapshot, shop_snapshot, subtotal, round_off, grand_total, payment_mode)
+             VALUES ('EST/26-27/001', '26-27', 1, '2026-10-08', '{\"name\":\"Lakhmichand\",\"mobile\":\"9027515504\",\"otherMobile\":\"\"}', '{}', 100, 0, 100, 'Cash');",
+        )
+        .unwrap();
+        let e = SavedEstimate { id: c.last_insert_rowid(), estimate_no: "EST/26-27/001".into(), seq: 1 };
         // version 2 does not allow a customer correction
         assert!(c.execute("UPDATE estimates SET customer_snapshot = '{}' WHERE id = ?1", [e.id]).is_err());
         init(&c).unwrap();
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         assert_eq!(select(&c, "SELECT estimate_no FROM estimates", &[]).unwrap()[0]["estimate_no"], "EST/26-27/001");
         update_estimate_customer(&mut c, e.id, "Lakhmichand Sharma", "9027515504", "").unwrap();
         assert!(c.execute("UPDATE estimates SET grand_total = 1 WHERE id = ?1", [e.id]).is_err());
+    }
+
+    #[test]
+    fn upgrades_a_version_3_database_keeping_old_items_as_weight_priced() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(&format!("{MIGRATION_V2} {MIGRATION_V3} PRAGMA user_version = 3;")).unwrap();
+        c.execute_batch(
+            "INSERT INTO invoices (invoice_no, fy, seq, date, buyer_snapshot, shop_snapshot, taxable, cgst, sgst, round_off, grand_total)
+               VALUES ('SR/26-27/001', '26-27', 1, '2026-10-08', '{}', '{}', 840950, 12614, 12614, 22, 866200);
+             INSERT INTO invoice_items (invoice_id, sl, description, metal, weight_mg, rate_input, rate_per_g, metal_value, making_type, making_value, making_amount, hsn)
+               VALUES (1, 1, 'Gold Ring 22kt', 'GOLD22', 550, 13900000, 1390000, 764500, 'PCT', 1000, 76450, '7113');",
+        )
+        .unwrap();
+        init(&c).unwrap();
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 4);
+        let r = &select(&c, "SELECT description, metal_value, pricing, sku, qty, unit_price FROM invoice_items", &[]).unwrap()[0];
+        assert_eq!(r["description"], "Gold Ring 22kt");
+        assert_eq!(r["metal_value"], 764500);
+        assert_eq!(r["pricing"], "WEIGHT");
+        assert_eq!(r["sku"], Value::Null);
+        assert_eq!(r["qty"], 1);
+        assert_eq!(r["unit_price"], 0);
+        // saved bills are still locked after the new columns
+        assert!(c.execute("UPDATE invoice_items SET sku = 'RNG0005'", []).is_err());
+        assert!(c.execute("DELETE FROM invoice_items", []).is_err());
+        assert_eq!(select(&c, "SELECT COUNT(*) AS n FROM catalogue", &[]).unwrap()[0]["n"], 0);
+    }
+
+    #[test]
+    fn fixed_price_items_are_saved_with_sku_qty_and_price() {
+        let mut c = mem();
+        let mut inv = invoice("2026-11-02", "26-27");
+        inv.items.push(NewItem {
+            description: "Silver 925 Ring (RNG0005)".into(),
+            metal: "SILVER925".into(),
+            rate_per_g: 145534,
+            metal_value: 145534,
+            making_type: "FIXED".into(),
+            hsn: "7113".into(),
+            pricing: "FIXED_PRICE".into(),
+            sku: Some("RNG0005".into()),
+            qty: 1,
+            unit_price: 149900,
+            ..Default::default()
+        });
+        let saved = save_invoice(&mut c, &inv).unwrap();
+        let rows = select(&c, "SELECT pricing, sku, qty, unit_price FROM invoice_items WHERE invoice_id = ?1 ORDER BY sl", &[json!(saved.id)]).unwrap();
+        assert_eq!(rows[0]["pricing"], "WEIGHT");
+        assert_eq!(rows[0]["sku"], Value::Null);
+        assert_eq!(rows[1]["pricing"], "FIXED_PRICE");
+        assert_eq!(rows[1]["sku"], "RNG0005");
+        assert_eq!(rows[1]["unit_price"], 149900);
+        let mut est = estimate("2026-11-02", "26-27", "", "Cash");
+        est.items = inv.items;
+        let e = save_estimate(&mut c, &est).unwrap();
+        let rows = select(&c, "SELECT sku FROM estimate_items WHERE estimate_id = ?1 ORDER BY sl", &[json!(e.id)]).unwrap();
+        assert_eq!(rows[1]["sku"], "RNG0005");
+    }
+
+    #[test]
+    fn catalogue_is_replaced_whole_or_kept() {
+        let mut c = mem();
+        let item = |sku: &str, price: i64| CatalogueItem {
+            sku: sku.into(),
+            name: "Ring".into(),
+            category: "Rings".into(),
+            shop_price: price,
+            weight_mg: Some(3500),
+            qty: Some(2),
+        };
+        assert_eq!(replace_catalogue(&mut c, &[item("rng0005", 149900), item("RNG0005", 1), item("PYL0001", 249900)], "2026-10-30 18:10").unwrap(), 2);
+        let rows = select(&c, "SELECT sku, shop_price FROM catalogue ORDER BY sku", &[]).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["sku"], "RNG0005");
+        assert_eq!(rows[1]["shop_price"], 149900); // first row wins
+        // an empty or useless sync keeps the cached copy
+        assert!(replace_catalogue(&mut c, &[], "2026-11-02 10:00").is_err());
+        assert!(replace_catalogue(&mut c, &[item("", 100), item("X1", 0)], "2026-11-02 10:00").is_err());
+        let rows = select(&c, "SELECT synced_at FROM catalogue", &[]).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["synced_at"], "2026-10-30 18:10");
+        // a good sync replaces it whole
+        assert_eq!(replace_catalogue(&mut c, &[item("BRC0001", 99900)], "2026-11-02 10:00").unwrap(), 1);
+        assert_eq!(select(&c, "SELECT sku FROM catalogue", &[]).unwrap()[0]["sku"], "BRC0001");
     }
 }

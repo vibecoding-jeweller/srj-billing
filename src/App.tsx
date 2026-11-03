@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getLatestRates, getRates, loadSettings, pastDescriptions, saveSettings, setRates } from './lib/api';
+import { getLatestRates, getRates, loadCatalogue, loadSettings, pastDescriptions, runCatalogueSync, saveSettings, setRates } from './lib/api';
+import type { CatalogueItem, SyncResult } from './lib/catalogue';
 import { BASE_DESCRIPTIONS, uniqueDescriptions } from './lib/search';
 import { todayISO } from './lib/fy';
 import { fmtMoneyShort } from './lib/money';
@@ -32,6 +33,23 @@ export default function App() {
       .catch(() => {});
   }, []);
   useEffect(refreshSuggestions, [refreshSuggestions]);
+
+  // 925 catalogue: use the cached copy at once, then refresh it from the sheet in the background.
+  const [catalogue, setCatalogue] = useState<Map<string, CatalogueItem>>(new Map());
+  const [catalogueSync, setCatalogueSync] = useState<SyncResult | null>(null);
+  const syncCatalogue = useCallback(async (url: string) => {
+    const r = await runCatalogueSync(url);
+    setCatalogueSync(r);
+    setCatalogue(await loadCatalogue().catch(() => new Map()));
+    return r;
+  }, []);
+  useEffect(() => {
+    loadCatalogue().then(setCatalogue).catch(() => {});
+  }, []);
+  const catalogueUrl = settings?.catalogueUrl ?? '';
+  useEffect(() => {
+    if (catalogueUrl) syncCatalogue(catalogueUrl);
+  }, [catalogueUrl, syncCatalogue]);
 
   const refreshRates = useCallback(async (date: string, askIfMissing: boolean) => {
     const r = await getRates(date);
@@ -124,15 +142,17 @@ export default function App() {
       <main className="content">
         {/* New Bill and Estimate stay mounted so a half-filled form survives a look at another tab */}
         <div style={{ display: screen === 'new' ? 'block' : 'none' }}>
-          <NewBill settings={settings} rates={rates} active={screen === 'new'} suggestions={suggestions} onSaved={refreshSuggestions} />
+          <NewBill settings={settings} rates={rates} active={screen === 'new'} suggestions={suggestions} catalogue={catalogue} onSaved={refreshSuggestions} />
         </div>
         <div style={{ display: screen === 'estimate' ? 'block' : 'none' }}>
-          <Estimate settings={settings} rates={rates} active={screen === 'estimate'} suggestions={suggestions} onSaved={refreshSuggestions} />
+          <Estimate settings={settings} rates={rates} active={screen === 'estimate'} suggestions={suggestions} catalogue={catalogue} onSaved={refreshSuggestions} />
         </div>
         {screen === 'old' && <OldBills settings={settings} />}
         {screen === 'customers' && <Customers settings={settings} />}
         {screen === 'reports' && <Reports settings={settings} />}
-        {screen === 'settings' && <SettingsScreen settings={settings} onSave={updateSettings} />}
+        {screen === 'settings' && (
+          <SettingsScreen settings={settings} onSave={updateSettings} catalogueCount={catalogue.size} catalogueSync={catalogueSync} onSyncCatalogue={syncCatalogue} />
+        )}
       </main>
       {ratesOpen && (
         <RatesModal

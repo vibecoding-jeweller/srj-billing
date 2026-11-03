@@ -2,7 +2,7 @@
 // No GST. Follows the shop's handwritten estimate pad: weight @ rate + making = amount.
 import { rgb } from 'pdf-lib';
 import type { EstimateDoc } from './types';
-import { METAL_LABEL } from './calc';
+import { METAL_LABEL, isFixedPrice, isSilver, qtyOf } from './calc';
 import { fmtMoney, fmtMoneyShort, fmtPct, fmtRoundOff, fmtWeight } from './money';
 import { fmtBillDate } from './fy';
 import { amountInWords } from './words';
@@ -75,8 +75,15 @@ export async function renderEstimatePdf(doc: EstimateDoc, assets: PdfAssets): Pr
     p.tc((cols[0] + cols[1]) / 2, ry, String(i + 1));
     p.tFit(cols[1] + 4, ry, it.description, 'B', 9, cols[2] - cols[1] - 8);
     p.t(cols[1] + 4, ry - 9, METAL_LABEL[it.metal], 'O', 7);
-    p.tr(cols[3] - 4, ry, fmtWeight(it.weightMg), 'B');
-    p.tr(cols[4] - 4, ry, `${fmtMoneyShort(it.rateInput)}/${it.metal === 'SILVER' ? 'kg' : '10g'}`);
+    p.tr(cols[3] - 4, ry, it.weightMg ? fmtWeight(it.weightMg) : '—', 'B');
+    if (isFixedPrice(it)) {
+      // tag price: qty × price, no rate or making
+      p.tr(cols[4] - 4, ry, `${qtyOf(it)} × ${fmtMoneyShort(it.unitPrice ?? 0)}`);
+      p.tr(cols[5] - 4, ry, '—');
+      p.tr(R - 4, ry, fmtMoney(it.metalValue), 'B');
+      return;
+    }
+    p.tr(cols[4] - 4, ry, `${fmtMoneyShort(it.rateInput)}/${isSilver(it.metal) ? 'kg' : '10g'}`);
     p.tr(cols[4] - 4, ry - 9, `metal ${fmtMoney(it.metalValue)}`, 'O', 7);
     const mk = it.makingType === 'PCT' ? `${fmtPct(it.makingValue)}%` : it.makingType === 'PER_G' ? `₹${fmtMoneyShort(it.makingValue)}/g` : `₹${fmtMoneyShort(it.makingValue)}`;
     if (it.makingAmount) {

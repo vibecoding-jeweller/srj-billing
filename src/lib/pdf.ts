@@ -6,7 +6,7 @@ import type { BillDoc, CopyKind } from './types';
 import { fmtMoney, fmtMoneyShort, fmtPct, fmtRoundOff, fmtWeight } from './money';
 import { fmtBillDate } from './fy';
 import { amountInWords } from './words';
-import { hsnSummary, makingLabel } from './calc';
+import { hsnSummary, isFixedPrice, makingLabel, qtyOf } from './calc';
 
 export interface PdfAssets {
   regular: Uint8Array;
@@ -217,6 +217,15 @@ export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAss
     p.t(L + 5, y, String(i + 1));
     p.tFit(62, y, it.description, 'B', 8.5, cols[2] - 62 - 3);
     p.t(253, y, it.hsn);
+    if (isFixedPrice(it)) {
+      // tag-price piece: value before GST, per piece; no making sub-line
+      // the weight, if entered, for a single piece; several pieces always show the count, since Rate is per piece
+      p.tr(cols[4] - 3, y, it.weightMg && qtyOf(it) === 1 ? `${fmtWeight(it.weightMg)} Grm` : `${qtyOf(it)} Pc`, 'B');
+      p.tr(cols[5] - 3, y, fmtMoney(it.ratePerG));
+      p.t(433, y, 'Pc');
+      p.tr(R - 3, y, fmtMoney(it.metalValue), 'B');
+      return;
+    }
     p.tr(cols[4] - 3, y, `${fmtWeight(it.weightMg)} Grm`, 'B');
     p.tr(cols[5] - 3, y, fmtMoney(it.ratePerG));
     p.t(433, y, 'Grm');
