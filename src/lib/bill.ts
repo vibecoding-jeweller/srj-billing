@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS: Settings = {
   billsFolder: '',
   backupFolder: '',
   catalogueUrl: '',
+  allowBackDatedBills: false,
   declaration:
     'We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.',
 };

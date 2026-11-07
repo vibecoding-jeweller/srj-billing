@@ -5,7 +5,7 @@ import { buildBillDoc, shopSnapshot } from '../lib/bill';
 import { CASH_BLOCK_MSG, checkBill, isCashBlocked, panRequired } from '../lib/validate';
 import { STATES, stateCode } from '../lib/states';
 import { financialYear, fmtBillDate, todayISO } from '../lib/fy';
-import { backupNow, findCustomer, saveInvoice, sha256Hex, openPath, type NewInvoicePayload, itemPayload } from '../lib/api';
+import { backupNow, findCustomer, getRates, saveInvoice, sha256Hex, openPath, type NewInvoicePayload, itemPayload } from '../lib/api';
 import { printPdf, saveBillPdfs } from '../lib/output';
 import { focusNextOnEnter } from '../lib/keys';
 import { askYesNo, showError } from '../lib/dialogs';
@@ -67,8 +67,25 @@ export function NewBill({
   const [done, setDone] = useState<Done | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
+  // Back-dated bills: hidden unless turned on in Settings → Advanced. Current FY only, never the future.
+  const today = todayISO();
+  const fyStart = `${Number(today.slice(5, 7)) >= 4 ? today.slice(0, 4) : Number(today.slice(0, 4)) - 1}-04-01`;
+  const [billDate, setBillDate] = useState(today);
+  const date = settings.allowBackDatedBills ? billDate : today;
+  const backDated = date !== today;
+  const [dateRates, setDateRates] = useState<DailyRates | null>(null);
+  useEffect(() => {
+    if (!backDated || !date) return setDateRates(null);
+    let stale = false;
+    getRates(date).then((r) => !stale && setDateRates(r));
+    return () => {
+      stale = true;
+    };
+  }, [date, backDated]);
+  const effectiveRates = backDated ? dateRates : rates;
+
   // ---------- derive ----------
-  const { parsed, validItems, itemErrors, itemCount } = parseRows(items.rows, rates, settings.hsn);
+  const { parsed, validItems, itemErrors, itemCount } = parseRows(items.rows, effectiveRates, settings.hsn);
   const bill = useMemo(() => calcBill(validItems, settings.gstRate), [JSON.stringify(validItems), settings.gstRate]);
 
   const payments: Payment[] = split
@@ -81,7 +98,8 @@ export function NewBill({
   const remaining = bill.grand - sumPayments(payments);
   const cashBlocked = bill.grand > 0 && isCashBlocked(payments);
   const panNeeded = panRequired(bill.grand);
-  const errors = checkBill({
+  const dateErrors = !date ? ['Choose the bill date.'] : date > today ? ['The bill date cannot be in the future.'] : date < fyStart ? ['A back-dated bill must be in the current financial year.'] : [];
+  const errors = [...dateErrors, ...checkBill({
     grand: bill.grand,
     itemCount,
     itemErrors,
@@ -89,7 +107,7 @@ export function NewBill({
     pan: buyer.pan,
     form60: buyer.form60,
     mobile: buyer.mobile,
-  });
+  })];
 
   // ---------- effects ----------
   // Customer lookup on 10 digits
@@ -170,6 +188,7 @@ export function NewBill({
     setRef('');
     setSplit(null);
     setShowErrors(false);
+    setBillDate(todayISO());
   };
 
   async function save() {
@@ -178,8 +197,8 @@ export function NewBill({
     if (errors.length) return;
     setSaving(true);
     try {
-      const date = todayISO();
       const fy = financialYear(date);
+      if (backDated && !(await askYesNo(`Save this GST bill dated ${fmtBillDate(date)}? It will get the next invoice number.`))) return;
       const logoHash = settings.logo ? (await sha256Hex(settings.logo)).slice(0, 16) : '';
       const pays = payments.map((p) => ({ ...p, referenceNo: needsReference(p.mode) ? (p.referenceNo ?? '').trim() : '' }));
       const doc = buildBillDoc({ invoiceNo: '', date, shop: shopSnapshot(settings, logoHash), buyer, items: validItems, payments: pays });
@@ -321,7 +340,7 @@ export function NewBill({
 
         <ItemsEditor
           parsed={parsed}
-          rates={rates}
+          rates={effectiveRates}
           showErrors={showErrors}
           showHsn
           defaultHsn={settings.hsn}
@@ -412,7 +431,11 @@ export function NewBill({
           <h3>Bill summary</h3>
           <div className="lines">
             <span>Bill date</span>
-            <span className="num">{fmtBillDate(todayISO())}</span>
+            {settings.allowBackDatedBills ? (
+              <input type="date" value={billDate} min={fyStart} max={today} className={dateErrors.length ? 'invalid' : ''} onChange={(e) => setBillDate(e.target.value)} style={{ justifySelf: 'end', ...(backDated ? { color: '#7a5200', fontWeight: 700 } : {}) }} />
+            ) : (
+              <span className="num">{fmtBillDate(today)}</span>
+            )}
             <span>Total weight</span>
             <span className="num">{fmtWeight(bill.totalWeightMg)} g</span>
             <span>Taxable value</span>

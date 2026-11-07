@@ -340,6 +340,16 @@ export function SettingsScreen({
         <textarea rows={3} style={{ width: '100%' }} value={s.declaration} onChange={(e) => set('declaration', e.target.value)} />
       </section>
 
+      <section className="card">
+        <h3>Advanced</h3>
+        <label className="row" style={{ alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={!!s.allowBackDatedBills} onChange={(e) => set('allowBackDatedBills', e.target.checked)} style={{ width: 'auto' }} />
+          <span>
+            Allow back-dated GST bills <span className="hint">— shows a date box on New Bill (current financial year only; the bill still gets the next number)</span>
+          </span>
+        </label>
+      </section>
+
       <div className="savebar">
         <button type="submit" className="btn primary">
           Save settings

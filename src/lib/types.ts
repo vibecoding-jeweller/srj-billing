@@ -31,6 +31,8 @@ export interface Settings {
   declaration: string;
   /** LUXMÉ 925 catalogue: the Apps Script web app URL ('' = not used) */
   catalogueUrl: string;
+  /** Hidden: lets a GST bill be dated earlier in the current FY. Off unless turned on in Settings. */
+  allowBackDatedBills?: boolean;
 }
 
 /** Frozen copy of the shop details stored with each invoice. */
