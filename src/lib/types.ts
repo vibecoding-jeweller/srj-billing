@@ -89,6 +89,9 @@ export interface BillDoc {
   sgst: number;
   roundOff: number;
   grand: number;
+  /** before GST, already taken off `taxable` (0 on bills saved before 0.4) */
+  discount?: number;
+  /** received when the bill was saved; less than `grand` when the customer paid part (balance by receipt) */
   payments: BillPayment[];
   cancelled?: boolean;
 }
@@ -131,6 +134,26 @@ export interface EstimateDoc {
   roundOff: number;
   /** balance the customer pays */
   grand: number;
+  discount?: number;
   paymentMode: PaymentMode;
+  /** received when the estimate was saved; null/undefined = paid in full */
+  paidNow?: number | null;
   cancelled?: boolean;
+}
+
+/** A later payment against a bill or estimate. */
+export interface ReceiptDoc {
+  receiptNo: string;
+  date: string;
+  shop: ShopSnapshot;
+  against: { kind: 'BILL' | 'EST'; no: string; date: string };
+  customerName: string;
+  mobile: string;
+  amount: number;
+  mode: PaymentMode;
+  referenceNo: string;
+  /** after this receipt */
+  total: number;
+  paidBefore: number;
+  balance: number;
 }

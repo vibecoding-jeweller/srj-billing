@@ -26,6 +26,8 @@ export interface BillCheckInput {
   pan: string;
   form60: boolean;
   mobile: string;
+  /** part payment: what the customer pays now (the rest is due later). Undefined = the full bill now. */
+  receivedNow?: number;
 }
 
 /** Returns blocking errors; an empty list means the bill can be saved. */
@@ -35,7 +37,10 @@ export function checkBill(b: BillCheckInput): string[] {
   if (b.mobile && !/^\d{10}$/.test(b.mobile)) errs.push('Mobile number must be 10 digits.');
   if (isCashBlocked(b.payments)) errs.push(CASH_BLOCK_MSG);
   const paid = sumPayments(b.payments);
-  if (paid !== b.grand) {
+  if (b.receivedNow != null) {
+    if (b.receivedNow < 0 || b.receivedNow >= b.grand) errs.push('Amount paid now must be less than the bill total (otherwise untick "Part payment").');
+    else if (paid !== b.receivedNow) errs.push(`Payment parts add up to ₹${fmtMoney(paid)} but the amount paid now is ₹${fmtMoney(b.receivedNow)}.`);
+  } else if (paid !== b.grand) {
     errs.push(`Payment parts add up to ₹${fmtMoney(paid)} but the bill total is ₹${fmtMoney(b.grand)}.`);
   }
   if (b.payments.some((p) => p.amount <= 0)) errs.push('Every payment part needs an amount.');

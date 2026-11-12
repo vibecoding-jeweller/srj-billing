@@ -53,6 +53,9 @@ export function Estimate({
   const [date, setDate] = useState(todayISO());
   const [dateRates, setDateRates] = useState<DailyRates | null>(null);
   const [exchanges, setExchanges] = useState<ExchangeRow[]>([]);
+  const [discountIn, setDiscountIn] = useState('');
+  const [partPay, setPartPay] = useState(false);
+  const [depositIn, setDepositIn] = useState('');
   const [focusExchange, setFocusExchange] = useState<number | null>(null);
   const [showErrors, setShowErrors] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -74,12 +77,14 @@ export function Estimate({
 
   const { parsed, validItems, itemErrors, itemCount } = parseRows(items.rows, effectiveRates, settings.hsn);
   const exchangeAmounts = exchanges.map((x) => (x.amount.trim() ? parsePaise(x.amount) : 0));
+  const discountRaw = discountIn.trim() ? parsePaise(discountIn) : 0;
   const est = useMemo(
-    () => calcEstimate(validItems, exchangeAmounts.map((a) => a ?? 0)),
-    [JSON.stringify(validItems), JSON.stringify(exchangeAmounts)],
+    () => calcEstimate(validItems, exchangeAmounts.map((a) => a ?? 0), discountRaw ?? 0),
+    [JSON.stringify(validItems), JSON.stringify(exchangeAmounts), discountRaw],
   );
-  // 269ST applies to the cash actually received: the balance after the exchange
-  const cashBlocked = mode === 'Cash' && isCashBlocked([{ mode, amount: est.grand }]);
+  const deposit = partPay ? (depositIn.trim() ? parsePaise(depositIn) : null) : null;
+  // 269ST applies to the cash actually received: the balance after the exchange (only the part paid now, when paying in parts)
+  const cashBlocked = mode === 'Cash' && isCashBlocked([{ mode, amount: partPay ? deposit ?? 0 : est.grand }]);
   const errors = [
     ...(!date ? ['Choose the estimate date.'] : date > today ? ['The estimate date cannot be in the future.'] : []),
     ...itemErrors,
@@ -89,6 +94,9 @@ export function Estimate({
     ...(customer.mobile && !/^\d{10}$/.test(customer.mobile) ? ['Mobile number must be 10 digits.'] : []),
     ...(customer.otherMobile && !/^\d{10}$/.test(customer.otherMobile) ? ['Other mobile number must be 10 digits.'] : []),
     ...(cashBlocked ? [CASH_BLOCK_MSG] : []),
+    ...(discountRaw == null ? ['Discount: enter an amount like 500.'] : discountRaw > 0 && est.subtotal > 0 && discountRaw >= est.subtotal ? ['Discount cannot be the whole estimate.'] : []),
+    ...(partPay && deposit == null ? ['Enter the amount the customer pays now (0 if nothing).'] : []),
+    ...(partPay && deposit != null && deposit >= est.grand ? ['Amount paid now must be less than the total (otherwise untick "Part payment").'] : []),
   ];
 
   // Repeat customer: fill the name from the mobile number
@@ -146,6 +154,9 @@ export function Estimate({
     setMode('Cash');
     setDate(todayISO());
     setExchanges([]);
+    setDiscountIn('');
+    setPartPay(false);
+    setDepositIn('');
     setShowErrors(false);
   };
 
@@ -158,7 +169,7 @@ export function Estimate({
       const fy = financialYear(date);
       const exch = exchanges.map((x, i) => ({ description: x.description, amount: exchangeAmounts[i] ?? 0 }));
       const logoHash = settings.logo ? (await sha256Hex(settings.logo)).slice(0, 16) : '';
-      const doc = buildEstimateDoc({ estimateNo: '', date, shop: shopSnapshot(settings, logoHash), customer, items: validItems, exchanges: exch, paymentMode: mode });
+      const doc = buildEstimateDoc({ estimateNo: '', date, shop: shopSnapshot(settings, logoHash), customer, items: validItems, exchanges: exch, paymentMode: mode, discount: est.discount, paidNow: partPay ? deposit ?? 0 : null });
       const payload: NewEstimatePayload = {
         date,
         fy,
@@ -173,6 +184,8 @@ export function Estimate({
         payment_mode: doc.paymentMode,
         items: doc.items.map((it) => itemPayload(it, false)),
         exchanges: doc.exchanges,
+        discount: doc.discount ?? 0,
+        paid_now: doc.paidNow ?? null,
       };
       const saved = await saveEstimate(payload);
       doc.estimateNo = saved.estimate_no;
@@ -306,8 +319,12 @@ export function Estimate({
 
         <section className="card stack">
           <h3>Payment</h3>
-          <div className="row">
-            <label className="field" style={{ width: 180 }}>
+          <div className="row" style={{ alignItems: 'flex-end' }}>
+            <label className="field" style={{ width: 160 }}>
+              Discount (₹)
+              <input data-nav className="num" inputMode="decimal" value={discountIn} placeholder="0" onChange={(e) => setDiscountIn(e.target.value)} />
+            </label>
+            <label className="field" style={{ width: 160 }}>
               Payment mode
               <select data-nav data-pay value={mode} onChange={(e) => setMode(e.target.value as PaymentMode)}>
                 {PAYMENT_MODES.map((m) => (
@@ -315,6 +332,15 @@ export function Estimate({
                 ))}
               </select>
             </label>
+            <label className="check" style={{ marginLeft: 'auto', paddingBottom: 10 }}>
+              <input type="checkbox" checked={partPay} onChange={(e) => setPartPay(e.target.checked)} /> Part payment (balance later)
+            </label>
+            {partPay && (
+              <label className="field" style={{ width: 160 }}>
+                Amount paid now (₹)
+                <input data-nav className="num" inputMode="decimal" value={depositIn} placeholder="0" onChange={(e) => setDepositIn(e.target.value)} />
+              </label>
+            )}
           </div>
           {cashBlocked && <div className="alert error">{CASH_BLOCK_MSG}</div>}
         </section>
@@ -332,6 +358,12 @@ export function Estimate({
             <span className="num">{fmtWeight(est.totalWeightMg)} g</span>
             <span>Items total</span>
             <span className="num">₹{fmtMoney(est.subtotal)}</span>
+            {est.discount > 0 && (
+              <>
+                <span>Less: discount</span>
+                <span className="num">(-)₹{fmtMoney(est.discount)}</span>
+              </>
+            )}
             {est.exchangeTotal > 0 && (
               <>
                 <span>Less: old jewellery</span>
@@ -345,6 +377,14 @@ export function Estimate({
             <strong>{est.exchangeTotal > 0 ? 'Balance to pay' : 'Total'}</strong>
             <span className="num">₹{fmtMoney(est.grand)}</span>
           </div>
+          {partPay && deposit != null && est.grand > 0 && (
+            <div className="lines due-lines">
+              <span>Paid now</span>
+              <span className="num">₹{fmtMoney(deposit)}</span>
+              <strong>Balance due</strong>
+              <strong className="num">₹{fmtMoney(Math.max(0, est.grand - deposit))}</strong>
+            </div>
+          )}
           <div className="hint">No GST on estimates.</div>
         </section>
         {showErrors && errors.length > 0 && (

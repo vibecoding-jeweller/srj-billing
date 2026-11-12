@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   daySummaryQuery,
+  totalSale,
   fmtDayHeader,
   foldSummary,
   groupByDate,
@@ -100,12 +101,27 @@ describe('Old Bills totals come from SQL over the whole filter', () => {
     expect(byName).toEqual(expected((x) => x.name === 'Shruti Mohan Uniyal'));
   });
 
-  it('day headers add up to the totals', () => {
+  it('day headers add up to the total sale, old jewellery included', () => {
     const f: RecordFilter = { ...all, from: '2026-10-01', to: '2026-10-31' };
     const days = run(db, daySummaryQuery(f));
     const s = foldSummary(run(db, summaryQuery(f)) as never);
+    expect(s.estimates.exchange).toBeGreaterThan(0);
     expect(days.reduce((a, d) => a + Number(d.n), 0)).toBe(s.bills.n + s.estimates.n);
-    expect(days.reduce((a, d) => a + Number(d.total), 0)).toBe(s.bills.total + s.estimates.total);
+    expect(days.reduce((a, d) => a + Number(d.total), 0)).toBe(totalSale(s));
+    expect(totalSale(s)).toBe(s.bills.total + s.estimates.total + s.estimates.exchange);
+  });
+
+  it('balance due: full payments show nothing due; deposits and receipts are counted', () => {
+    const page = run(db, listRecordsQuery(all, 0, 100000));
+    expect(page.every((r) => Number(r.due) === 0)).toBe(true);
+    const fresh = new DatabaseSync(':memory:');
+    fresh.exec(appSchema());
+    fresh.exec(`INSERT INTO estimates (estimate_no, fy, seq, date, customer_snapshot, shop_snapshot, subtotal, round_off, grand_total, payment_mode, paid_now)
+      VALUES ('EST/26-27/900', '26-27', 900, '2026-12-01', '{"name":"Due Test"}', '{}', 5000000, 0, 5000000, 'Cash', 1000000)`);
+    const id = Number((fresh.prepare(`SELECT id FROM estimates WHERE seq = 900`).get() as { id: number }).id);
+    fresh.exec(`INSERT INTO receipts (receipt_no, fy, seq, date, kind, doc_id, amount, mode) VALUES ('RC/26-27/001', '26-27', 1, '2026-12-05', 'EST', ${id}, 1500000, 'UPI')`);
+    const row = run(fresh, listRecordsQuery({ ...all, q: 'Due Test' }))[0];
+    expect(Number(row.due)).toBe(2500000);
   });
 
   it('paging returns every record exactly once, newest first', () => {

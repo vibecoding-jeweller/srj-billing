@@ -5,10 +5,15 @@ import {
   cancelInvoice,
   daySummaries,
   estimateEdits,
+  getDues,
   getEstimateDoc,
   getInvoiceDoc,
+  listReceipts,
   listRecords,
+  saveReceipt,
   summaryRecords,
+  type Dues,
+  type ReceiptRow,
   updateEstimateCustomer,
   type FieldEdit,
   type RecordFilter,
@@ -16,12 +21,13 @@ import {
   type RecordRow,
   type RecordsSummary,
 } from '../lib/api';
-import { fmtBillDate, todayISO } from '../lib/fy';
-import { fmtMoney, fmtWeight } from '../lib/money';
-import { makeEstimatePdf, makePdf, openCopy, openEstimate, printPdf, saveEstimatePdf } from '../lib/output';
-import { fmtDayHeader, groupByDate, PAGE_SIZE, presetRange, PRESETS, type Preset } from '../lib/records';
+import { financialYear, fmtBillDate, todayISO } from '../lib/fy';
+import { fmtMoney, fmtMoneyShort, fmtWeight, parsePaise } from '../lib/money';
+import { needsReference, PAYMENT_MODES, type PaymentMode } from '../lib/calc';
+import { makeEstimatePdf, makePdf, openCopy, openEstimate, printPdf, saveEstimatePdf, saveReceiptPdf } from '../lib/output';
+import { fmtDayHeader, groupByDate, PAGE_SIZE, presetRange, PRESETS, totalSale, type Preset } from '../lib/records';
 import { Modal } from '../components/Modal';
-import type { BillDoc, EstimateDoc, Settings } from '../lib/types';
+import type { BillDoc, EstimateDoc, ReceiptDoc, Settings } from '../lib/types';
 
 const KIND_LABEL: Record<RecordKind, string> = { BILL: 'Bill', EST: 'Estimate' };
 
@@ -205,29 +211,45 @@ export function OldBills({ settings }: { settings: Settings }) {
           </label>
         </div>
 
-        <div className="totals-bar">
-          <span className="range">{rangeText}</span>
-          {kind !== 'EST' && (
-            <span>
-              Bills ({summary?.bills.n ?? 0}) <b className="big-num">₹{fmtMoney(summary?.bills.total ?? 0)}</b>
-            </span>
-          )}
-          {kind !== 'BILL' && (
-            <span>
-              Estimates ({summary?.estimates.n ?? 0}) <b className="big-num">₹{fmtMoney(summary?.estimates.total ?? 0)}</b>
-              {(summary?.estimates.exchange ?? 0) > 0 && <span className="hint"> + old jewellery ₹{fmtMoney(summary!.estimates.exchange)}</span>}
-            </span>
-          )}
-          {!kind && (
-            <span className="grand-sum">
-              Total sale <b className="big-num">₹{fmtMoney((summary?.bills.total ?? 0) + (summary?.estimates.total ?? 0))}</b>
-            </span>
-          )}
-          {(summary?.cancelled ?? 0) > 0 && (
-            <span className="hint">
-              {summary!.cancelled} cancelled {showCancelled ? '(shown, not counted)' : '(hidden)'}
-            </span>
-          )}
+        <div className="sales-card">
+          <div className="sales-head">
+            <span className="range">{rangeText}</span>
+            {(summary?.cancelled ?? 0) > 0 && (
+              <span className="hint">
+                {summary!.cancelled} cancelled {showCancelled ? '(shown, not counted)' : '(hidden, not counted)'}
+              </span>
+            )}
+          </div>
+          <div className="sales-tiles">
+            {!kind && (
+              <div className="tile hero">
+                <span className="tile-label">Total sale</span>
+                <b>₹{fmtMoneyShort(summary ? totalSale(summary) : 0)}</b>
+                <span className="tile-sub">bills + estimates + old jewellery</span>
+              </div>
+            )}
+            {kind !== 'EST' && (
+              <div className="tile">
+                <span className="tile-label">GST bills</span>
+                <b>₹{fmtMoneyShort(summary?.bills.total ?? 0)}</b>
+                <span className="tile-sub">{summary?.bills.n ?? 0} bills</span>
+              </div>
+            )}
+            {kind !== 'BILL' && (
+              <div className="tile">
+                <span className="tile-label">Estimates</span>
+                <b>₹{fmtMoneyShort(summary?.estimates.total ?? 0)}</b>
+                <span className="tile-sub">{summary?.estimates.n ?? 0} estimates</span>
+              </div>
+            )}
+            {kind !== 'BILL' && (
+              <div className="tile">
+                <span className="tile-label">Old jewellery taken</span>
+                <b>₹{fmtMoneyShort(summary?.estimates.exchange ?? 0)}</b>
+                <span className="tile-sub">counted in the sale</span>
+              </div>
+            )}
+          </div>
         </div>
         {msg && <div className={'alert ' + msg.kind}>{msg.text}</div>}
 
@@ -299,6 +321,7 @@ export function OldBills({ settings }: { settings: Settings }) {
                           </td>
                           <td>
                             {r.status === 'CANCELLED' ? <span className="badge cancel">CANCELLED</span> : r.modes}
+                            {r.status === 'ACTIVE' && Number(r.due) > 0 && <span className="badge due">Due ₹{fmtMoneyShort(Number(r.due))}</span>}
                           </td>
                           <td className="num nowrap">
                             <span className={r.status === 'CANCELLED' ? 'struck' : ''}>₹{fmtMoney(r.grand_total)}</span>
@@ -329,6 +352,11 @@ export function OldBills({ settings }: { settings: Settings }) {
           onClose={() => setPanel(null)}
           onCancel={() => setCancelling(panel)}
           onEdit={() => setEditing(panel)}
+          onPaid={async (text) => {
+            setMsg({ kind: 'ok', text });
+            await load();
+            setPanelVersion((v) => v + 1);
+          }}
         />
       )}
 
@@ -375,6 +403,7 @@ export function RecordPanel({
   onClose,
   onCancel,
   onEdit,
+  onPaid,
 }: {
   record: RecordRow;
   settings: Settings;
@@ -383,7 +412,15 @@ export function RecordPanel({
   onClose: () => void;
   onCancel?: () => void;
   onEdit?: () => void;
+  onPaid?: (message: string) => void;
 }) {
+  const [dues, setDues] = useState<Dues | null>(null);
+  const [receipts, setReceipts] = useState<ReceiptRow[]>([]);
+  const [paying, setPaying] = useState(false);
+  useEffect(() => {
+    getDues(record.kind, record.id).then(setDues).catch(() => {});
+    listReceipts(record.kind, record.id).then(setReceipts).catch(() => {});
+  }, [record.kind, record.id]);
   const [data, setData] = useState<{ bill?: BillDoc; est?: EstimateDoc; logo: string } | null>(null);
   const [err, setErr] = useState('');
   const [edits, setEdits] = useState<(FieldEdit & { edited_at: string })[]>([]);
@@ -457,6 +494,12 @@ export function RecordPanel({
           </table>
 
           <div className="panel-lines">
+            {(doc?.discount ?? 0) > 0 && (
+              <>
+                <span>Discount{data?.bill ? ' (before GST)' : ''}</span>
+                <span className="num">(-)₹{fmtMoney(doc!.discount!)}</span>
+              </>
+            )}
             {data?.bill && (
               <>
                 <span>Taxable</span>
@@ -472,7 +515,7 @@ export function RecordPanel({
               </span>
             ))}
             <span>
-              <b>{data?.est?.exchangeTotal ? 'Balance paid' : 'Total'}</b>
+              <b>{data?.est?.exchangeTotal ? 'After old jewellery' : 'Total'}</b>
             </span>
             <span className="num">
               <b className={record.status === 'CANCELLED' ? 'struck' : ''}>₹{fmtMoney(record.grand_total)}</b>
@@ -488,7 +531,30 @@ export function RecordPanel({
                     {p.referenceNo && <span className="hint"> · Ref {p.referenceNo}</span>}
                   </div>
                 ))
-              : data?.est && <div>{data.est.paymentMode}</div>}
+              : data?.est && (
+                  <div>
+                    {data.est.paymentMode}
+                    {data.est.paidNow != null && ` ₹${fmtMoney(data.est.paidNow)} (advance)`}
+                  </div>
+                )}
+            {receipts.map((r) => (
+              <div key={r.id}>
+                {r.mode} ₹{fmtMoney(r.amount)} <span className="hint">· {r.receipt_no} · {fmtBillDate(r.date)}{r.reference_no ? ` · Ref ${r.reference_no}` : ''}</span>
+              </div>
+            ))}
+            {dues && dues.balance > 0 && record.status === 'ACTIVE' && (
+              <div className="due-box">
+                <span>
+                  Paid ₹{fmtMoney(dues.paid)} · <b>Balance due ₹{fmtMoney(dues.balance)}</b>
+                </span>
+                {onPaid && (
+                  <button className="btn primary" disabled={busy} onClick={() => setPaying(true)}>
+                    Record payment…
+                  </button>
+                )}
+              </div>
+            )}
+            {dues && dues.balance === 0 && receipts.length > 0 && <div className="ok-text">Paid in full</div>}
           </div>
         </>
       )}
@@ -516,6 +582,20 @@ export function RecordPanel({
           ))}
         </div>
       )}
+      {paying && dues && doc && (
+        <PaymentModal
+          record={record}
+          dues={dues}
+          paidBefore={dues.paid}
+          settings={settings}
+          logo={data?.logo ?? ''}
+          shop={doc.shop}
+          onClose={(text) => {
+            setPaying(false);
+            if (text) onPaid?.(text);
+          }}
+        />
+      )}
       {onCancel && isBill && <div className="hint">GST bills can't be edited. Cancel and make a new bill.</div>}
       {onCancel && record.status === 'ACTIVE' && (
         <button className="btn danger panel-cancel" disabled={busy} onClick={onCancel}>
@@ -523,6 +603,116 @@ export function RecordPanel({
         </button>
       )}
     </aside>
+  );
+}
+
+/** Record a later payment (balance) against a bill or estimate, then save and print a receipt. */
+function PaymentModal({
+  record,
+  dues,
+  paidBefore,
+  settings,
+  logo,
+  shop,
+  onClose,
+}: {
+  record: RecordRow;
+  dues: Dues;
+  paidBefore: number;
+  settings: Settings;
+  logo: string;
+  shop: ReceiptDoc['shop'];
+  onClose: (message?: string) => void;
+}) {
+  const [amountIn, setAmountIn] = useState(String(dues.balance / 100));
+  const [mode, setMode] = useState<PaymentMode>('Cash');
+  const [ref, setRef] = useState('');
+  const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const amount = parsePaise(amountIn);
+
+  const save = async () => {
+    setErr('');
+    if (amount == null || amount <= 0) return setErr('Enter the amount received.');
+    if (amount > dues.balance) return setErr(`Only ₹${fmtMoney(dues.balance)} is due.`);
+    if (needsReference(mode) && !ref.trim()) return setErr(`Enter the ${mode === 'Cheque' ? 'cheque number' : 'UTR / reference number'}.`);
+    setSaving(true);
+    try {
+      const date = todayISO();
+      const saved = await saveReceipt({ kind: record.kind, doc_id: record.id, date, fy: financialYear(date), prefix: 'RC', amount, mode, reference_no: ref.trim() });
+      const doc: ReceiptDoc = {
+        receiptNo: saved.receipt_no,
+        date,
+        shop,
+        against: { kind: record.kind, no: record.no, date: record.date },
+        customerName: record.name,
+        mobile: record.mobile ?? '',
+        amount,
+        mode,
+        referenceNo: ref.trim(),
+        total: dues.total,
+        paidBefore,
+        balance: saved.balance,
+      };
+      backupNow().catch(() => {});
+      let note = '';
+      try {
+        const out = await saveReceiptPdf(doc, logo, settings.billsFolder);
+        await printPdf(out.bytes).catch(() => {});
+      } catch (e) {
+        note = ` (receipt PDF could not be saved: ${e})`;
+      }
+      onClose(`Receipt ${saved.receipt_no}: ₹${fmtMoney(amount)} received on ${record.no}. ${saved.balance ? `Balance ₹${fmtMoney(saved.balance)}.` : 'Paid in full.'}${note}`);
+    } catch (e) {
+      setErr(String(e));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title={`Record payment on ${record.no}`} onClose={() => onClose()}>
+      <div>
+        {record.name} · Total ₹{fmtMoney(dues.total)} · Paid ₹{fmtMoney(dues.paid)} · <b>Due ₹{fmtMoney(dues.balance)}</b>
+      </div>
+      <form
+        className="stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
+      >
+        <div className="row">
+          <label className="field grow">
+            Amount received (₹)
+            <input autoFocus className="num" inputMode="decimal" value={amountIn} onChange={(e) => setAmountIn(e.target.value)} />
+          </label>
+          <label className="field" style={{ width: 150 }}>
+            Mode
+            <select value={mode} onChange={(e) => setMode(e.target.value as PaymentMode)}>
+              {PAYMENT_MODES.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {needsReference(mode) && (
+          <label className="field">
+            {mode === 'Cheque' ? 'Cheque number' : 'UTR / Reference no.'}
+            <input value={ref} onChange={(e) => setRef(e.target.value)} />
+          </label>
+        )}
+        <div className="hint">A numbered receipt is saved and printed. The {record.kind === 'BILL' ? 'GST bill' : 'estimate'} itself is not changed.</div>
+        {err && <div className="alert error">{err}</div>}
+        <div className="actions">
+          <button type="button" className="btn" onClick={() => onClose()}>
+            Cancel
+          </button>
+          <button type="submit" className="btn primary" disabled={saving}>
+            {saving ? 'Saving…' : 'Save & print receipt'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 

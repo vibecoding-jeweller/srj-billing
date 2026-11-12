@@ -62,6 +62,9 @@ export function NewBill({
   const [mode, setMode] = useState<PaymentMode>('Cash');
   const [ref, setRef] = useState('');
   const [split, setSplit] = useState<SplitRow[] | null>(null);
+  const [discountIn, setDiscountIn] = useState('');
+  const [partPay, setPartPay] = useState(false);
+  const [depositIn, setDepositIn] = useState('');
   const [showErrors, setShowErrors] = useState(false);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<Done | null>(null);
@@ -86,20 +89,29 @@ export function NewBill({
 
   // ---------- derive ----------
   const { parsed, validItems, itemErrors, itemCount } = parseRows(items.rows, effectiveRates, settings.hsn);
-  const bill = useMemo(() => calcBill(validItems, settings.gstRate), [JSON.stringify(validItems), settings.gstRate]);
+  const discountRaw = discountIn.trim() ? parsePaise(discountIn) : 0;
+  const bill = useMemo(() => calcBill(validItems, settings.gstRate, discountRaw ?? 0), [JSON.stringify(validItems), settings.gstRate, discountRaw]);
+  const deposit = partPay ? (depositIn.trim() ? parsePaise(depositIn) : null) : null;
+  /** what the customer pays now */
+  const target = partPay ? deposit ?? 0 : bill.grand;
 
-  const payments: Payment[] = split
+  const payments: Payment[] = partPay && target === 0
+    ? [] // nothing paid now: the whole bill is due
+    : split
     ? (() => {
         const fixed = split.map((s) => (s.amount == null ? 0 : parsePaise(s.amount) ?? 0));
-        const rest = bill.grand - fixed.reduce((a, b) => a + b, 0);
+        const rest = target - fixed.reduce((a, b) => a + b, 0);
         return split.map((s, i) => ({ mode: s.mode, amount: s.amount == null ? Math.max(0, rest) : fixed[i], referenceNo: s.ref }));
       })()
-    : [{ mode, amount: bill.grand, referenceNo: ref }];
-  const remaining = bill.grand - sumPayments(payments);
+    : [{ mode, amount: target, referenceNo: ref }];
+  const remaining = target - sumPayments(payments);
   const cashBlocked = bill.grand > 0 && isCashBlocked(payments);
   const panNeeded = panRequired(bill.grand);
+  const discountErrors =
+    discountRaw == null ? ['Discount: enter an amount like 500.'] : discountRaw > 0 && discountRaw >= bill.subtotal && bill.subtotal > 0 ? ['Discount cannot be the whole bill.'] : [];
+  const depositErrors = partPay && deposit == null ? ['Enter the amount the customer pays now (0 if nothing).'] : [];
   const dateErrors = !date ? ['Choose the bill date.'] : date > today ? ['The bill date cannot be in the future.'] : date < fyStart ? ['A back-dated bill must be in the current financial year.'] : [];
-  const errors = [...dateErrors, ...checkBill({
+  const errors = [...dateErrors, ...discountErrors, ...depositErrors, ...checkBill({
     grand: bill.grand,
     itemCount,
     itemErrors,
@@ -107,6 +119,7 @@ export function NewBill({
     pan: buyer.pan,
     form60: buyer.form60,
     mobile: buyer.mobile,
+    receivedNow: partPay ? deposit ?? 0 : undefined,
   })];
 
   // ---------- effects ----------
@@ -187,6 +200,9 @@ export function NewBill({
     setMode('Cash');
     setRef('');
     setSplit(null);
+    setDiscountIn('');
+    setPartPay(false);
+    setDepositIn('');
     setShowErrors(false);
     setBillDate(todayISO());
   };
@@ -201,7 +217,7 @@ export function NewBill({
       if (backDated && !(await askYesNo(`Save this GST bill dated ${fmtBillDate(date)}? It will get the next invoice number.`))) return;
       const logoHash = settings.logo ? (await sha256Hex(settings.logo)).slice(0, 16) : '';
       const pays = payments.map((p) => ({ ...p, referenceNo: needsReference(p.mode) ? (p.referenceNo ?? '').trim() : '' }));
-      const doc = buildBillDoc({ invoiceNo: '', date, shop: shopSnapshot(settings, logoHash), buyer, items: validItems, payments: pays });
+      const doc = buildBillDoc({ invoiceNo: '', date, shop: shopSnapshot(settings, logoHash), buyer, items: validItems, payments: pays, discount: bill.discount });
       const b = doc.buyer;
       const payload: NewInvoicePayload = {
         date,
@@ -221,6 +237,7 @@ export function NewBill({
         grand_total: doc.grand,
         items: doc.items.map((it) => itemPayload(it, true)),
         payments: pays.map((p) => ({ mode: p.mode, amount: p.amount, reference_no: p.referenceNo })),
+        discount: doc.discount ?? 0,
       };
       const saved = await saveInvoice(payload);
       doc.invoiceNo = saved.invoice_no;
@@ -355,7 +372,31 @@ export function NewBill({
 
         <section className="card stack">
           <h3>Payment</h3>
-          {!split ? (
+          <div className="row" style={{ alignItems: 'flex-end' }}>
+            <label className="field" style={{ width: 180 }}>
+              <span>
+                Discount (₹) <span className="hint">— before GST</span>
+              </span>
+              <input data-nav className={'num' + (showErrors && discountErrors.length ? ' invalid' : '')} inputMode="decimal" value={discountIn} placeholder="0" onChange={(e) => setDiscountIn(e.target.value)} />
+            </label>
+            {bill.discount > 0 && (
+              <span className="hint" style={{ paddingBottom: 10 }}>
+                Customer saves ₹{fmtMoney(bill.discount)} + GST
+              </span>
+            )}
+            <label className="check" style={{ marginLeft: 'auto', paddingBottom: 10 }}>
+              <input type="checkbox" checked={partPay} onChange={(e) => setPartPay(e.target.checked)} /> Part payment (balance later)
+            </label>
+            {partPay && (
+              <label className="field" style={{ width: 180 }}>
+                Amount paid now (₹)
+                <input data-nav className={'num' + (showErrors && depositErrors.length ? ' invalid' : '')} inputMode="decimal" value={depositIn} placeholder="0" onChange={(e) => setDepositIn(e.target.value)} />
+              </label>
+            )}
+          </div>
+          {partPay && target === 0 ? (
+            <div className="hint">Nothing paid now. The whole ₹{fmtMoney(bill.grand)} is due; record payments later from Old Bills.</div>
+          ) : !split ? (
             <div className="row">
               <label className="field" style={{ width: 180 }}>
                 Payment mode
@@ -438,6 +479,14 @@ export function NewBill({
             )}
             <span>Total weight</span>
             <span className="num">{fmtWeight(bill.totalWeightMg)} g</span>
+            {bill.discount > 0 && (
+              <>
+                <span>Items total</span>
+                <span className="num">₹{fmtMoney(bill.subtotal)}</span>
+                <span>Less discount</span>
+                <span className="num">−₹{fmtMoney(bill.discount)}</span>
+              </>
+            )}
             <span>Taxable value</span>
             <span className="num">₹{fmtMoney(bill.taxable)}</span>
             <span>CGST {fmtPct(bill.cgstRate)}%</span>
@@ -451,6 +500,14 @@ export function NewBill({
             <strong>Grand Total</strong>
             <span className="num">₹{fmtMoney(bill.grand)}</span>
           </div>
+          {partPay && deposit != null && bill.grand > 0 && (
+            <div className="lines due-lines">
+              <span>Paid now</span>
+              <span className="num">₹{fmtMoney(deposit)}</span>
+              <strong>Balance due</strong>
+              <strong className="num">₹{fmtMoney(Math.max(0, bill.grand - deposit))}</strong>
+            </div>
+          )}
         </section>
         {showErrors && errors.length > 0 && (
           <div className="alert error">

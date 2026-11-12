@@ -253,6 +253,63 @@ CREATE TABLE IF NOT EXISTS catalogue (
 );
 "#;
 
+/// Version 5 (app 0.4.0): bill discount, part payment (deposit now, balance later) and payment receipts.
+/// Saved bills stay locked: a later payment is a new receipt row, never an edit of the bill.
+const MIGRATION_V5: &str = r#"
+ALTER TABLE invoices ADD COLUMN discount INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE estimates ADD COLUMN discount INTEGER NOT NULL DEFAULT 0;
+-- amount received when the estimate was saved; NULL = paid in full
+ALTER TABLE estimates ADD COLUMN paid_now INTEGER;
+
+CREATE TABLE IF NOT EXISTS receipts (
+  id INTEGER PRIMARY KEY,
+  receipt_no TEXT UNIQUE NOT NULL,
+  fy TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('BILL','EST')),
+  doc_id INTEGER NOT NULL,
+  amount INTEGER NOT NULL CHECK (amount > 0),
+  mode TEXT NOT NULL,
+  reference_no TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  UNIQUE (fy, seq)
+);
+CREATE INDEX IF NOT EXISTS receipts_doc ON receipts(kind, doc_id);
+CREATE INDEX IF NOT EXISTS receipts_date ON receipts(date);
+CREATE TRIGGER IF NOT EXISTS receipts_no_update BEFORE UPDATE ON receipts
+BEGIN SELECT RAISE(ABORT, 'Saved receipts cannot be edited'); END;
+CREATE TRIGGER IF NOT EXISTS receipts_no_delete BEFORE DELETE ON receipts
+BEGIN SELECT RAISE(ABORT, 'Saved receipts cannot be deleted'); END;
+
+-- the edit guards must also cover the new columns
+DROP TRIGGER IF EXISTS invoices_only_cancel;
+CREATE TRIGGER invoices_only_cancel BEFORE UPDATE ON invoices
+WHEN NOT (OLD.status = 'ACTIVE' AND NEW.status = 'CANCELLED'
+  AND NEW.invoice_no IS OLD.invoice_no AND NEW.fy IS OLD.fy AND NEW.seq IS OLD.seq AND NEW.date IS OLD.date
+  AND NEW.customer_id IS OLD.customer_id AND NEW.buyer_snapshot IS OLD.buyer_snapshot AND NEW.shop_snapshot IS OLD.shop_snapshot
+  AND NEW.taxable IS OLD.taxable AND NEW.cgst IS OLD.cgst AND NEW.sgst IS OLD.sgst
+  AND NEW.round_off IS OLD.round_off AND NEW.grand_total IS OLD.grand_total AND NEW.created_at IS OLD.created_at
+  AND NEW.discount IS OLD.discount)
+BEGIN SELECT RAISE(ABORT, 'Saved bills cannot be edited, only cancelled'); END;
+
+DROP TRIGGER IF EXISTS estimates_only_cancel;
+CREATE TRIGGER estimates_only_cancel BEFORE UPDATE ON estimates
+WHEN NOT (
+  NEW.estimate_no IS OLD.estimate_no AND NEW.fy IS OLD.fy AND NEW.seq IS OLD.seq AND NEW.date IS OLD.date
+  AND NEW.shop_snapshot IS OLD.shop_snapshot AND NEW.subtotal IS OLD.subtotal AND NEW.round_off IS OLD.round_off
+  AND NEW.grand_total IS OLD.grand_total AND NEW.payment_mode IS OLD.payment_mode AND NEW.created_at IS OLD.created_at
+  AND NEW.exchange_total IS OLD.exchange_total AND NEW.discount IS OLD.discount AND NEW.paid_now IS OLD.paid_now
+  AND (
+    (OLD.status = 'ACTIVE' AND NEW.status = 'CANCELLED'
+      AND NEW.customer_id IS OLD.customer_id AND NEW.customer_snapshot IS OLD.customer_snapshot)
+    OR
+    (OLD.status = 'ACTIVE' AND NEW.status = 'ACTIVE'
+      AND NEW.cancel_reason IS OLD.cancel_reason AND NEW.cancelled_at IS OLD.cancelled_at)
+  ))
+BEGIN SELECT RAISE(ABORT, 'Saved estimates cannot be edited, only cancelled (the customer name and mobile can be corrected)'); END;
+"#;
+
 /// Brings an older database up to date, one version at a time, each step in a transaction.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -264,6 +321,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if version < 4 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_V4} PRAGMA user_version = 4; COMMIT;"))?;
+    }
+    if version < 5 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V5} PRAGMA user_version = 5; COMMIT;"))?;
     }
     Ok(())
 }
@@ -395,7 +455,11 @@ pub struct NewInvoice {
     pub round_off: i64,
     pub grand_total: i64,
     pub items: Vec<NewItem>,
+    /// What was received when the bill was saved; may be less than the total (balance paid later by receipt).
     pub payments: Vec<NewPayment>,
+    /// before GST, already taken off `taxable`
+    #[serde(default)]
+    pub discount: i64,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -411,6 +475,10 @@ pub fn format_invoice_no(prefix: &str, fy: &str, seq: i64) -> String {
 
 /// Assigns the invoice number and writes the bill in one transaction: no gaps, no duplicates.
 pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result<SavedInvoice> {
+    let paid: i64 = inv.payments.iter().map(|p| p.amount).sum();
+    if paid > inv.grand_total || inv.payments.iter().any(|p| p.amount <= 0) || inv.discount < 0 {
+        return Err(rusqlite::Error::InvalidParameterName("Payments must be positive and not more than the bill total.".into()));
+    }
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let last: Option<i64> = tx
         .query_row("SELECT MAX(seq) FROM invoices WHERE fy = ?1", params![inv.fy], |r| r.get(0))
@@ -445,8 +513,8 @@ pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result
 
     tx.execute(
         "INSERT INTO invoices (invoice_no, fy, seq, date, customer_id, buyer_snapshot, shop_snapshot,
-           taxable, cgst, sgst, round_off, grand_total, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ACTIVE')",
+           taxable, cgst, sgst, round_off, grand_total, status, discount)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ACTIVE', ?13)",
         params![
             invoice_no,
             inv.fy,
@@ -459,7 +527,8 @@ pub fn save_invoice(conn: &mut Connection, inv: &NewInvoice) -> rusqlite::Result
             inv.cgst,
             inv.sgst,
             inv.round_off,
-            inv.grand_total
+            inv.grand_total,
+            inv.discount
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -529,6 +598,11 @@ pub struct NewEstimate {
     /// Old jewellery taken in exchange: money only, deducted from the total
     #[serde(default)]
     pub exchanges: Vec<NewExchange>,
+    #[serde(default)]
+    pub discount: i64,
+    /// received now when the customer pays only part; None = paid in full
+    #[serde(default)]
+    pub paid_now: Option<i64>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -540,6 +614,9 @@ pub struct SavedEstimate {
 
 /// Same rules as bills: number assigned inside the transaction, own series per FY.
 pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Result<SavedEstimate> {
+    if matches!(est.paid_now, Some(p) if p < 0 || p > est.grand_total) || est.discount < 0 {
+        return Err(rusqlite::Error::InvalidParameterName("The amount paid now must be between 0 and the total.".into()));
+    }
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let last: Option<i64> = tx.query_row("SELECT MAX(seq) FROM estimates WHERE fy = ?1", params![est.fy], |r| r.get(0))?;
     let seq = last.map(|s| s + 1).unwrap_or(1);
@@ -565,8 +642,8 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
     }
     tx.execute(
         "INSERT INTO estimates (estimate_no, fy, seq, date, customer_id, customer_snapshot, shop_snapshot,
-           subtotal, round_off, grand_total, payment_mode, exchange_total, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ACTIVE')",
+           subtotal, round_off, grand_total, payment_mode, exchange_total, status, discount, paid_now)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ACTIVE', ?13, ?14)",
         params![
             estimate_no,
             est.fy,
@@ -579,7 +656,9 @@ pub fn save_estimate(conn: &mut Connection, est: &NewEstimate) -> rusqlite::Resu
             est.round_off,
             est.grand_total,
             est.payment_mode,
-            est.exchanges.iter().map(|x| x.amount).sum::<i64>()
+            est.exchanges.iter().map(|x| x.amount).sum::<i64>(),
+            est.discount,
+            est.paid_now
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -708,6 +787,116 @@ pub fn update_estimate_customer(
     Ok(edits)
 }
 
+/// Sec 269ST: cash of ₹2,00,000 or more for one sale is not allowed (counted over all its payments).
+pub const CASH_LIMIT: i64 = 2_00_000_00;
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Dues {
+    pub total: i64,
+    pub paid: i64,
+    pub balance: i64,
+    pub cash: i64,
+}
+
+/// Total, received so far (at saving + all receipts), balance and the cash part, for one bill or estimate.
+pub fn dues(conn: &Connection, kind: &str, id: i64) -> Result<Dues, String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let (total, at_save, cash_at_save, status): (i64, i64, i64, String) = match kind {
+        "BILL" => conn
+            .query_row(
+                "SELECT grand_total,
+                   (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = i.id),
+                   (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = i.id AND mode = 'Cash'),
+                   status FROM invoices i WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(e)?
+            .ok_or("Bill not found.")?,
+        "EST" => conn
+            .query_row(
+                "SELECT grand_total, COALESCE(paid_now, grand_total),
+                   CASE WHEN payment_mode = 'Cash' THEN COALESCE(paid_now, grand_total) ELSE 0 END, status
+                 FROM estimates WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(e)?
+            .ok_or("Estimate not found.")?,
+        _ => return Err("Unknown record type.".into()),
+    };
+    let _ = status;
+    let (later, later_cash): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount),0), COALESCE(SUM(CASE WHEN mode='Cash' THEN amount ELSE 0 END),0)
+             FROM receipts WHERE kind = ?1 AND doc_id = ?2",
+            params![kind, id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(e)?;
+    let paid = at_save + later;
+    Ok(Dues { total, paid, balance: total - paid, cash: cash_at_save + later_cash })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct NewReceipt {
+    pub kind: String,
+    pub doc_id: i64,
+    pub date: String,
+    pub fy: String,
+    pub prefix: String,
+    pub amount: i64,
+    pub mode: String,
+    #[serde(default)]
+    pub reference_no: String,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SavedReceipt {
+    pub id: i64,
+    pub receipt_no: String,
+    pub balance: i64,
+}
+
+/// Records a later payment against an ACTIVE bill or estimate. Never more than the balance; the bill itself is not touched.
+pub fn save_receipt(conn: &mut Connection, r: &NewReceipt) -> Result<SavedReceipt, String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    if r.amount <= 0 {
+        return Err("Enter the amount received.".into());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(e)?;
+    let table = if r.kind == "BILL" { "invoices" } else { "estimates" };
+    let status: String = tx
+        .query_row(&format!("SELECT status FROM {table} WHERE id = ?1"), params![r.doc_id], |x| x.get(0))
+        .optional()
+        .map_err(e)?
+        .ok_or("Record not found.")?;
+    if status != "ACTIVE" {
+        return Err("This record is cancelled.".into());
+    }
+    let d = dues(&tx, &r.kind, r.doc_id)?;
+    if r.amount > d.balance {
+        return Err(format!("Only ₹{}.{:02} is due.", d.balance / 100, d.balance % 100));
+    }
+    if r.mode == "Cash" && d.cash + r.amount >= CASH_LIMIT {
+        return Err("Cash of ₹2 lakh or more for one sale is not allowed (Sec 269ST). Take the rest by UPI / bank.".into());
+    }
+    let last: Option<i64> = tx.query_row("SELECT MAX(seq) FROM receipts WHERE fy = ?1", params![r.fy], |x| x.get(0)).map_err(e)?;
+    let seq = last.map(|s| s + 1).unwrap_or(1);
+    let receipt_no = format_invoice_no(&r.prefix, &r.fy, seq);
+    tx.execute(
+        "INSERT INTO receipts (receipt_no, fy, seq, date, kind, doc_id, amount, mode, reference_no)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![receipt_no, r.fy, seq, r.date, r.kind, r.doc_id, r.amount, r.mode, r.reference_no.trim()],
+    )
+    .map_err(e)?;
+    let id = tx.last_insert_rowid();
+    tx.commit().map_err(e)?;
+    Ok(SavedReceipt { id, receipt_no, balance: d.balance - r.amount })
+}
+
 pub fn cancel_invoice(conn: &Connection, id: i64, reason: &str) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE invoices SET status='CANCELLED', cancel_reason=?2, cancelled_at=datetime('now','localtime')
@@ -806,6 +995,7 @@ mod tests {
                 ..weight_item()
             }],
             payments: vec![NewPayment { mode: "UPI".into(), amount: 866200, reference_no: "".into() }],
+            discount: 0,
         }
     }
 
@@ -889,6 +1079,8 @@ mod tests {
             payment_mode: "Cash".into(),
             items: invoice(date, fy).items,
             exchanges: vec![],
+            discount: 0,
+            paid_now: None,
         }
     }
 
@@ -961,7 +1153,7 @@ mod tests {
         init(&c).unwrap();
         init(&c).unwrap(); // running again is harmless
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         let rows = select(&c, "SELECT name, other_mobile, notes FROM customers", &[]).unwrap();
         assert_eq!(rows[0]["name"], "Shruti");
         assert_eq!(rows[0]["other_mobile"], "");
@@ -1069,7 +1261,7 @@ mod tests {
         assert!(c.execute("UPDATE estimates SET customer_snapshot = '{}' WHERE id = ?1", [e.id]).is_err());
         init(&c).unwrap();
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         assert_eq!(select(&c, "SELECT estimate_no FROM estimates", &[]).unwrap()[0]["estimate_no"], "EST/26-27/001");
         update_estimate_customer(&mut c, e.id, "Lakhmichand Sharma", "9027515504", "").unwrap();
         assert!(c.execute("UPDATE estimates SET grand_total = 1 WHERE id = ?1", [e.id]).is_err());
@@ -1089,7 +1281,7 @@ mod tests {
         .unwrap();
         init(&c).unwrap();
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         let r = &select(&c, "SELECT description, metal_value, pricing, sku, qty, unit_price FROM invoice_items", &[]).unwrap()[0];
         assert_eq!(r["description"], "Gold Ring 22kt");
         assert_eq!(r["metal_value"], 764500);
@@ -1101,6 +1293,66 @@ mod tests {
         assert!(c.execute("UPDATE invoice_items SET sku = 'RNG0005'", []).is_err());
         assert!(c.execute("DELETE FROM invoice_items", []).is_err());
         assert_eq!(select(&c, "SELECT COUNT(*) AS n FROM catalogue", &[]).unwrap()[0]["n"], 0);
+    }
+
+    #[test]
+    fn part_paid_bill_takes_receipts_up_to_the_balance_and_stays_locked() {
+        let mut c = mem();
+        let mut inv = invoice("2026-11-12", "26-27");
+        inv.discount = 50000;
+        inv.payments = vec![NewPayment { mode: "Cash".into(), amount: 500000, reference_no: "".into() }];
+        let b = save_invoice(&mut c, &inv).unwrap();
+        assert_eq!(dues(&c, "BILL", b.id).unwrap(), Dues { total: 866200, paid: 500000, balance: 366200, cash: 500000 });
+        let rc = |amount: i64, mode: &str| NewReceipt {
+            kind: "BILL".into(),
+            doc_id: b.id,
+            date: "2026-11-20".into(),
+            fy: "26-27".into(),
+            prefix: "RC".into(),
+            amount,
+            mode: mode.into(),
+            reference_no: "".into(),
+        };
+        assert!(save_receipt(&mut c, &rc(366300, "UPI")).is_err(), "more than the balance");
+        let r1 = save_receipt(&mut c, &rc(200000, "UPI")).unwrap();
+        assert_eq!((r1.receipt_no.as_str(), r1.balance), ("RC/26-27/001", 166200));
+        let r2 = save_receipt(&mut c, &rc(166200, "Cash")).unwrap();
+        assert_eq!((r2.receipt_no.as_str(), r2.balance), ("RC/26-27/002", 0));
+        assert_eq!(dues(&c, "BILL", b.id).unwrap().balance, 0);
+        // the bill, its discount and the receipts can never be edited
+        assert!(c.execute("UPDATE invoices SET discount = 0", []).is_err());
+        assert!(c.execute("UPDATE receipts SET amount = 1", []).is_err());
+        assert!(c.execute("DELETE FROM receipts", []).is_err());
+        assert!(save_invoice(&mut c, &NewInvoice { payments: vec![NewPayment { mode: "UPI".into(), amount: 900000, reference_no: "".into() }], ..invoice("2026-11-12", "26-27") }).is_err());
+    }
+
+    #[test]
+    fn receipts_respect_the_cash_limit_over_the_whole_sale() {
+        let mut c = mem();
+        let mut e = estimate("2026-11-12", "26-27", "", "Cash");
+        e.grand_total = 30000000; // ₹3,00,000
+        e.paid_now = Some(15000000); // ₹1,50,000 cash now
+        let s = save_estimate(&mut c, &e).unwrap();
+        assert_eq!(dues(&c, "EST", s.id).unwrap(), Dues { total: 30000000, paid: 15000000, balance: 15000000, cash: 15000000 });
+        let rc = |amount: i64, mode: &str| NewReceipt {
+            kind: "EST".into(),
+            doc_id: s.id,
+            date: "2026-11-13".into(),
+            fy: "26-27".into(),
+            prefix: "RC".into(),
+            amount,
+            mode: mode.into(),
+            reference_no: "".into(),
+        };
+        assert!(save_receipt(&mut c, &rc(5000000, "Cash")).is_err(), "₹2 lakh cash in all");
+        assert!(save_receipt(&mut c, &rc(4999900, "Cash")).is_ok());
+        assert!(save_receipt(&mut c, &rc(10000100, "UPI")).is_ok());
+        assert_eq!(dues(&c, "EST", s.id).unwrap().balance, 0);
+        assert!(c.execute("UPDATE estimates SET paid_now = NULL", []).is_err());
+        // a cancelled record takes no payments
+        let s2 = save_estimate(&mut c, &NewEstimate { paid_now: Some(0), ..estimate("2026-11-12", "26-27", "", "Cash") }).unwrap();
+        cancel_estimate(&c, s2.id, "test").unwrap();
+        assert!(save_receipt(&mut c, &NewReceipt { doc_id: s2.id, ..rc(100, "UPI") }).is_err());
     }
 
     #[test]

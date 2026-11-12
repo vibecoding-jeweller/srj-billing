@@ -198,10 +198,11 @@ export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAss
   // 6. Items table
   const cols = [L, 58, 250, 300, 365, 430, 455, R];
   const th = bb;
-  const itemsHeight = doc.items.reduce((h, it, i) => h + (i > 0 ? 14 : 0) + (it.makingAmount ? 12 : 0), 0);
+  const disc = doc.discount ?? 0;
+  const itemsHeight = doc.items.reduce((h, it, i) => h + (i > 0 ? 14 : 0) + (it.makingAmount ? 12 : 0), 0) + (disc ? 24 : 0);
   const lastBaseline = th - 36 - itemsHeight - 18 - 20 - 24;
   // Each extra HSN row in the tax summary takes 14 pt; take it from the items table so the page still fits.
-  const hsnRows = hsnSummary(doc.items, shop.gstRate);
+  const hsnRows = hsnSummary(doc.items, shop.gstRate, disc);
   const tb = Math.min(th - 275 + 14 * (hsnRows.length - 1), lastBaseline - 28);
   p.rect(L, tb, R - L, th - tb);
   for (const x of cols.slice(1, -1)) p.ln(x, th, x, tb + 18);
@@ -238,6 +239,15 @@ export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAss
   });
   y -= 18;
   p.ln(455, y + 8, R, y + 8);
+  if (disc) {
+    // items total, the discount, then the taxable value the GST is worked on
+    p.tr(R - 3, y - 2, fmtMoney(doc.taxable + disc));
+    y -= 12;
+    p.tr(cols[2] - 5, y - 2, 'Less : Discount', 'I');
+    p.tr(R - 3, y - 2, `(-)${fmtMoney(disc)}`, 'B');
+    y -= 12;
+    p.ln(455, y + 8, R, y + 8);
+  }
   p.tr(R - 3, y - 2, fmtMoney(doc.taxable));
   y -= 20;
   for (const [lab, v] of [
@@ -254,6 +264,10 @@ export async function renderBillPdf(doc: BillDoc, copy: CopyKind, assets: PdfAss
   p.tr(cols[3] - 5, tb + 6, 'Total');
   p.tr(cols[4] - 3, tb + 6, `${fmtWeight(doc.totalWeightMg)} Grm`, 'B');
   p.tr(R - 3, tb + 5, `₹ ${fmtMoney(doc.grand)}`, 'D', 10);
+  const paidAtBilling = doc.payments.reduce((t, x) => t + x.amount, 0);
+  if (!doc.cancelled && paidAtBilling < doc.grand) {
+    p.tFit(L + 3, tb + 6, `Advance received ₹${fmtMoney(paidAtBilling)}  ·  Balance ₹${fmtMoney(doc.grand - paidAtBilling)}`, 'B', 7.5, cols[3] - 40 - L);
+  }
 
   // 7. Amount in words
   y = tb - 10;

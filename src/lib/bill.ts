@@ -82,6 +82,7 @@ export function buildBillDoc(args: {
   buyer: Buyer;
   items: ItemInput[];
   payments: BillPayment[];
+  discount?: number;
 }): BillDoc {
   const items = args.items.map((it) => ({
     ...it,
@@ -89,7 +90,7 @@ export function buildBillDoc(args: {
     sku: it.sku?.trim().toUpperCase() || undefined,
     hsn: it.hsn.trim() || args.shop.hsn,
   }));
-  const c = calcBill(items, args.shop.gstRate);
+  const c = calcBill(items, args.shop.gstRate, args.discount ?? 0);
   return {
     invoiceNo: args.invoiceNo,
     date: args.date,
@@ -104,6 +105,7 @@ export function buildBillDoc(args: {
     sgst: c.sgst,
     roundOff: c.roundOff,
     grand: c.grand,
+    discount: c.discount,
     payments: args.payments,
   };
 }
@@ -116,6 +118,8 @@ export function buildEstimateDoc(args: {
   items: ItemInput[];
   exchanges?: ExchangeLine[];
   paymentMode: PaymentMode;
+  discount?: number;
+  paidNow?: number | null;
 }): EstimateDoc {
   const items = args.items.map((it) => ({
     ...it,
@@ -124,7 +128,7 @@ export function buildEstimateDoc(args: {
     hsn: '',
   }));
   const exchanges = (args.exchanges ?? []).filter((x) => x.amount > 0).map((x) => ({ description: x.description.trim(), amount: x.amount }));
-  const c = calcEstimate(items, exchanges.map((x) => x.amount));
+  const c = calcEstimate(items, exchanges.map((x) => x.amount), args.discount ?? 0);
   return {
     estimateNo: args.estimateNo,
     date: args.date,
@@ -141,6 +145,8 @@ export function buildEstimateDoc(args: {
     exchangeTotal: c.exchangeTotal,
     roundOff: c.roundOff,
     grand: c.grand,
+    discount: c.discount,
     paymentMode: args.paymentMode,
+    paidNow: args.paidNow ?? null,
   };
 }

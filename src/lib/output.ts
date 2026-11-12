@@ -8,7 +8,8 @@ import italicUrl from '../assets/fonts/LiberationSans-Italic.ttf?url';
 import rupeeUrl from '../assets/fonts/DejaVuSans-Bold.ttf?url';
 import { renderBillPdf, type PdfAssets } from './pdf';
 import { renderEstimatePdf } from './estimatePdf';
-import type { BillDoc, CopyKind, EstimateDoc } from './types';
+import { renderReceiptPdf } from './receiptPdf';
+import type { BillDoc, CopyKind, EstimateDoc, ReceiptDoc } from './types';
 import { financialYear, invoiceFileStem, monthFolder } from './fy';
 import { fileExists, openPath, printWindow, writeFile } from './api';
 
@@ -72,6 +73,14 @@ export async function openEstimate(doc: EstimateDoc, logo: string, billsFolder: 
   }
   if (!(await fileExists(path))) await writeFile(path, await makeEstimatePdf(doc, logo));
   return openPath(path);
+}
+
+/** {Bills folder}/Receipts/{FY}/{MM-Mon}/RC-26-27-001.pdf — saved, returns the bytes for printing. */
+export async function saveReceiptPdf(doc: ReceiptDoc, logo: string, billsFolder: string) {
+  const bytes = await renderReceiptPdf(doc, { ...(await fonts()), logo: dataUrlToBytes(logo) });
+  const path = joinPath(billsFolder, 'Receipts', financialYear(doc.date), monthFolder(doc.date), `${invoiceFileStem(doc.receiptNo)}.pdf`);
+  await writeFile(path, bytes);
+  return { path, bytes };
 }
 
 /** {Bills folder}/{FY}/{MM-Mon}/SR-26-27-001_customer.pdf */

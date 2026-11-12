@@ -17,13 +17,17 @@ export const RECORDS_SOURCE = `(
   SELECT 'BILL' AS kind, i.id, i.invoice_no AS no, i.date, i.created_at,
     json_extract(i.buyer_snapshot,'$.name') AS name, json_extract(i.buyer_snapshot,'$.mobile') AS mobile,
     '' AS other_mobile, i.grand_total, i.status, i.cancel_reason,
-    (SELECT group_concat(mode, ' + ') FROM payments p WHERE p.invoice_id = i.id) AS modes, 0 AS exchange
+    (SELECT group_concat(mode, ' + ') FROM payments p WHERE p.invoice_id = i.id) AS modes, 0 AS exchange,
+    i.grand_total - (SELECT COALESCE(SUM(amount), 0) FROM payments p WHERE p.invoice_id = i.id)
+      - (SELECT COALESCE(SUM(amount), 0) FROM receipts r WHERE r.kind = 'BILL' AND r.doc_id = i.id) AS due
   FROM invoices i
   UNION ALL
   SELECT 'EST', e.id, e.estimate_no, e.date, e.created_at,
     json_extract(e.customer_snapshot,'$.name'), json_extract(e.customer_snapshot,'$.mobile'),
     json_extract(e.customer_snapshot,'$.otherMobile'), e.grand_total, e.status, e.cancel_reason,
-    e.payment_mode || CASE WHEN e.exchange_total > 0 THEN ' + old jewellery' ELSE '' END, e.exchange_total
+    e.payment_mode || CASE WHEN e.exchange_total > 0 THEN ' + old jewellery' ELSE '' END, e.exchange_total,
+    e.grand_total - COALESCE(e.paid_now, e.grand_total)
+      - (SELECT COALESCE(SUM(amount), 0) FROM receipts r WHERE r.kind = 'EST' AND r.doc_id = e.id)
   FROM estimates e
 )`;
 
@@ -57,7 +61,7 @@ export const PAGE_SIZE = 100;
 export function listRecordsQuery(f: RecordFilter, offset = 0, limit = PAGE_SIZE) {
   const w = recordsWhere(f);
   return {
-    sql: `SELECT kind, id, no, date, name, mobile, other_mobile, grand_total, status, cancel_reason, modes, exchange
+    sql: `SELECT kind, id, no, date, name, mobile, other_mobile, grand_total, status, cancel_reason, modes, exchange, due
           FROM ${RECORDS_SOURCE} ${w.sql}
           ORDER BY date DESC, created_at DESC, id DESC LIMIT ${Math.max(1, Math.floor(limit))} OFFSET ${Math.max(0, Math.floor(offset))}`,
     args: w.args,
@@ -74,20 +78,27 @@ export function summaryQuery(f: RecordFilter) {
   };
 }
 
-/** Per-day sales for the date headers ("Sun, 1 Nov 2026 · 7 sales · ₹1,24,500"), active records only. */
+/**
+ * Per-day sales for the date headers ("Sun, 1 Nov 2026 · 7 sales · ₹1,24,500"), active records only.
+ * Old jewellery taken in exchange is part of the sale, so it is counted in the day's total.
+ */
 export function daySummaryQuery(f: RecordFilter) {
   const w = recordsWhere(f, true);
   return {
-    sql: `SELECT date, COUNT(*) AS n, COALESCE(SUM(grand_total), 0) AS total FROM ${RECORDS_SOURCE} ${w.sql} GROUP BY date`,
+    sql: `SELECT date, COUNT(*) AS n, COALESCE(SUM(grand_total + exchange), 0) AS total FROM ${RECORDS_SOURCE} ${w.sql} GROUP BY date`,
     args: w.args,
   };
 }
 
 export interface RecordsSummary {
   bills: { n: number; total: number };
+  /** total = money to collect; exchange = old jewellery taken in part payment */
   estimates: { n: number; total: number; exchange: number };
   cancelled: number;
 }
+
+/** Total sale = bills + estimates + old jewellery (the old jewellery is part of what the customer paid). */
+export const totalSale = (s: RecordsSummary) => s.bills.total + s.estimates.total + s.estimates.exchange;
 
 export function foldSummary(rows: { kind: string; status: string; n: number; total: number; exchange: number }[]): RecordsSummary {
   const s: RecordsSummary = { bills: { n: 0, total: 0 }, estimates: { n: 0, total: 0, exchange: 0 }, cancelled: 0 };

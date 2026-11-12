@@ -233,3 +233,25 @@ table.list.compact th, table.list.compact td { padding: 6px 8px; font-size: 0.9r
 .did-you-mean { display: block; margin-top: 4px; padding: 3px 8px; border: 1px dashed var(--accent); border-radius: 6px; background: var(--accent-soft); color: var(--ink); font-size: 0.85rem; cursor: pointer; text-align: left; }
 .did-you-mean b { color: var(--accent); }
 .danger-text { color: var(--danger); }
+
+/* ---------- sales summary card (Old Bills) ---------- */
+.sales-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.sales-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.sales-head .range { font-weight: 700; color: var(--accent); }
+.sales-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.sales-tiles .tile { display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); min-width: 0; }
+.sales-tiles .tile b { font-size: 1.35rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sales-tiles .tile-label { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.sales-tiles .tile-sub { font-size: 0.8rem; color: var(--muted); }
+.sales-tiles .tile.hero { background: var(--accent-soft); border-color: var(--accent); }
+.sales-tiles .tile.hero b { font-size: 1.6rem; color: var(--accent); }
+.sales-tiles .tile.hero .tile-label { color: var(--accent); }
+
+/* ---------- part payments ---------- */
+.badge.due { background: var(--danger-soft); color: var(--danger); margin-left: 6px; }
+.due-box { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--danger-soft); }
+.ok-text { color: var(--ok); font-weight: 600; margin-top: 4px; }
+.due-lines { border-top: 1px dashed var(--line); padding-top: 8px; }
+.due-lines strong:last-child { color: var(--danger); }
+label.check { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; cursor: pointer; }
+label.check input { width: auto; }

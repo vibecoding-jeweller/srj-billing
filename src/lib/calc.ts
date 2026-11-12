@@ -74,6 +74,10 @@ export interface BillCalc {
   /** in order of first appearance on the bill */
   hsnSummary: HsnRow[];
   totalWeightMg: number;
+  /** Σ item amounts before the discount (before GST) */
+  subtotal: number;
+  /** before GST */
+  discount: number;
   taxable: number;
   /** hundredths of a percent, e.g. 150 = 1.50% */
   cgstRate: number;
@@ -129,7 +133,24 @@ type TaxItem = Pick<ItemCalc, 'hsn' | 'metalValue' | 'makingAmount'> & Pick<Item
  * Fixed-price items: the GST inside their tag prices (all of that code together), see inclusiveTax.
  * @param gstRate total GST in hundredths of a percent (300 = 3%), split equally into CGST and SGST.
  */
-export function hsnSummary(items: TaxItem[], gstRate: number): HsnRow[] {
+export function hsnSummary(items: TaxItem[], gstRate: number, discount = 0): HsnRow[] {
+  const rows = hsnSummaryGross(items, gstRate);
+  if (discount <= 0) return rows;
+  // A discount on the bill is taken off the taxable value before GST (shown on the invoice),
+  // shared across the HSN codes in proportion; the last code takes any odd paisa. GST is then worked out afresh.
+  const total = rows.reduce((t, r) => t + r.taxable, 0);
+  let left = Math.min(discount, total);
+  const all = left;
+  return rows.map((r, k) => {
+    const d = k === rows.length - 1 ? left : total ? Number(divRoundHalfUp(BigInt(r.taxable) * BigInt(all), BigInt(total))) : 0;
+    left -= d;
+    const taxable = r.taxable - d;
+    const half = Number(divRoundHalfUp(BigInt(taxable) * BigInt(gstRate), 20_000n));
+    return { hsn: r.hsn, taxable, cgst: half, sgst: half };
+  });
+}
+
+function hsnSummaryGross(items: TaxItem[], gstRate: number): HsnRow[] {
   const groups = new Map<string, { weight: bigint; incl: number }>();
   for (const i of items) {
     const key = i.hsn.trim();
@@ -170,9 +191,16 @@ function fixedPriceTaxable(calc: ItemCalc[], gstRate: number): ItemCalc[] {
   return out;
 }
 
-export function calcBill(items: ItemInput[], gstRate = 300): BillCalc {
+/** Largest discount a bill can take: its value before GST. */
+export function billSubtotal(items: ItemInput[], gstRate = 300): number {
+  return hsnSummaryGross(fixedPriceTaxable(items.map(calcItem), gstRate), gstRate).reduce((t, r) => t + r.taxable, 0);
+}
+
+export function calcBill(items: ItemInput[], gstRate = 300, discount = 0): BillCalc {
   const calc = fixedPriceTaxable(items.map(calcItem), gstRate);
-  const summary = hsnSummary(calc, gstRate);
+  const subtotal = hsnSummaryGross(calc, gstRate).reduce((t, r) => t + r.taxable, 0);
+  const disc = Math.max(0, Math.min(discount, subtotal));
+  const summary = hsnSummary(calc, gstRate, disc);
   const taxable = summary.reduce((s, r) => s + BigInt(r.taxable), 0n);
   const cgst = summary.reduce((s, r) => s + BigInt(r.cgst), 0n);
   const sgst = summary.reduce((s, r) => s + BigInt(r.sgst), 0n);
@@ -182,6 +210,8 @@ export function calcBill(items: ItemInput[], gstRate = 300): BillCalc {
     items: calc,
     hsnSummary: summary,
     totalWeightMg: calc.reduce((s, i) => s + i.weightMg, 0),
+    subtotal,
+    discount: disc,
     taxable: Number(taxable),
     cgstRate: gstRate / 2,
     sgstRate: gstRate / 2,
@@ -223,24 +253,27 @@ export interface EstimateCalc {
   totalWeightMg: number;
   /** Σ (metal value + making) */
   subtotal: number;
+  discount: number;
   /** old jewellery taken in exchange (money only) */
   exchangeTotal: number;
   roundOff: number;
-  /** what the customer pays: (subtotal − exchange) rounded to the nearest rupee (half up) */
+  /** what the customer pays: (subtotal − discount − exchange) rounded to the nearest rupee (half up) */
   grand: number;
 }
 
 /** Estimate (no GST): item amounts added up, old-jewellery exchange taken off, rounded to the rupee. */
-export function calcEstimate(items: ItemInput[], exchangeAmounts: number[] = []): EstimateCalc {
+export function calcEstimate(items: ItemInput[], exchangeAmounts: number[] = [], discount = 0): EstimateCalc {
   const calc = items.map(calcItem);
   const subtotal = calc.reduce((s, i) => s + i.metalValue + i.makingAmount, 0);
   const exchangeTotal = exchangeAmounts.reduce((s, a) => s + a, 0);
-  const net = subtotal - exchangeTotal;
+  const disc = Math.max(0, Math.min(discount, subtotal));
+  const net = subtotal - disc - exchangeTotal;
   const grand = Number(divRoundHalfUp(BigInt(net), 100n) * 100n);
   return {
     items: calc,
     totalWeightMg: calc.reduce((s, i) => s + i.weightMg, 0),
     subtotal,
+    discount: disc,
     exchangeTotal,
     roundOff: grand - net,
     grand,

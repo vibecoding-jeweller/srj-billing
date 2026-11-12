@@ -98,6 +98,11 @@ export async function renderEstimatePdf(doc: EstimateDoc, assets: PdfAssets): Pr
   p.t(L, y, `Total weight : ${fmtWeight(doc.totalWeightMg)} g`, 'R', 8.5);
   p.tr(cols[5] - 4, y, 'Sub total', 'R', 8.5);
   p.tr(R - 4, y, fmtMoney(doc.subtotal));
+  if (doc.discount) {
+    y -= 12;
+    p.tr(cols[5] - 4, y, 'Less: Discount', 'R', 8.5);
+    p.tr(R - 4, y, `(-)${fmtMoney(doc.discount)}`);
+  }
   // Old jewellery taken in exchange: money only (no weight or rate printed)
   for (const x of doc.exchanges) {
     y -= 12;
@@ -108,7 +113,9 @@ export async function renderEstimatePdf(doc: EstimateDoc, assets: PdfAssets): Pr
   y -= 12;
   p.tr(cols[5] - 4, y, 'Round off', 'R', 8.5);
   p.tr(R - 4, y, fmtRoundOff(doc.roundOff));
-  p.t(L, tb - 26, `Payment : ${doc.paymentMode}`, 'R', 8.5);
+  const part = doc.paidNow != null && doc.paidNow < doc.grand;
+  p.t(L, tb - 26, part ? `Advance paid : ₹${fmtMoney(doc.paidNow!)} (${doc.paymentMode})` : `Payment : ${doc.paymentMode}`, part ? 'B' : 'R', 8.5);
+  if (part) p.t(L, tb - 38, `Balance due : ₹${fmtMoney(doc.grand - doc.paidNow!)}`, 'B', 8.5);
   y -= 6;
   p.ln(cols[4], y, R, y);
   y -= 14;

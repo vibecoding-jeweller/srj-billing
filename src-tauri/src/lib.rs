@@ -53,6 +53,18 @@ fn save_estimate(state: State<AppState>, estimate: db::NewEstimate) -> CmdResult
 }
 
 #[tauri::command]
+fn save_receipt(state: State<AppState>, receipt: db::NewReceipt) -> CmdResult<db::SavedReceipt> {
+    let mut conn = state.conn.lock().map_err(err)?;
+    db::save_receipt(&mut conn, &receipt)
+}
+
+#[tauri::command]
+fn dues(state: State<AppState>, kind: String, id: i64) -> CmdResult<db::Dues> {
+    let conn = state.conn.lock().map_err(err)?;
+    db::dues(&conn, &kind, id)
+}
+
+#[tauri::command]
 fn cancel_estimate(state: State<AppState>, id: i64, reason: String) -> CmdResult<usize> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -229,6 +241,8 @@ pub fn run() {
             cancel_invoice,
             save_estimate,
             cancel_estimate,
+            save_receipt,
+            dues,
             update_estimate_customer,
             fetch_catalogue,
             replace_catalogue,

@@ -191,7 +191,9 @@ export interface NewInvoicePayload {
   round_off: number;
   grand_total: number;
   items: ItemPayload[];
+  /** received now; may be less than the total when the customer pays part */
   payments: { mode: PaymentMode; amount: number; reference_no: string }[];
+  discount: number;
 }
 
 export const saveInvoice = (invoice: NewInvoicePayload) =>
@@ -216,6 +218,8 @@ export interface RecordRow {
   modes: string | null;
   /** old jewellery taken in exchange (estimates only) */
   exchange: number;
+  /** balance still to be paid (0 = paid in full) */
+  due: number;
 }
 
 /** One page of bills and estimates, newest first. */
@@ -246,6 +250,44 @@ export async function pastDescriptions(): Promise<string[]> {
   return rows.map((r) => r.d);
 }
 
+// ---------- part payments ----------
+
+export interface Dues {
+  total: number;
+  paid: number;
+  balance: number;
+  cash: number;
+}
+
+export const getDues = (kind: RecordKind, id: number) => invoke<Dues>('dues', { kind, id });
+
+export interface NewReceiptPayload {
+  kind: RecordKind;
+  doc_id: number;
+  date: string;
+  fy: string;
+  prefix: string;
+  amount: number;
+  mode: PaymentMode;
+  reference_no: string;
+}
+
+export const saveReceipt = (receipt: NewReceiptPayload) =>
+  invoke<{ id: number; receipt_no: string; balance: number }>('save_receipt', { receipt });
+
+export interface ReceiptRow {
+  id: number;
+  receipt_no: string;
+  date: string;
+  amount: number;
+  mode: PaymentMode;
+  reference_no: string;
+}
+
+/** Later payments against one bill or estimate, oldest first. */
+export const listReceipts = (kind: RecordKind, id: number) =>
+  select<ReceiptRow>('SELECT id, receipt_no, date, amount, mode, reference_no FROM receipts WHERE kind = ?1 AND doc_id = ?2 ORDER BY id', [kind, id]);
+
 // ---------- estimates ----------
 
 export interface NewEstimatePayload {
@@ -262,6 +304,9 @@ export interface NewEstimatePayload {
   payment_mode: PaymentMode;
   items: ItemPayload[];
   exchanges: { description: string; amount: number }[];
+  discount: number;
+  /** null = paid in full */
+  paid_now: number | null;
 }
 
 export const saveEstimate = (estimate: NewEstimatePayload) =>
@@ -292,7 +337,9 @@ export async function getEstimateDoc(id: number): Promise<{ doc: EstimateDoc; lo
     exchangeTotal: n(e.exchange_total ?? 0),
     roundOff: n(e.round_off),
     grand: n(e.grand_total),
+    discount: n(e.discount ?? 0),
     paymentMode: e.payment_mode as PaymentMode,
+    paidNow: e.paid_now == null ? null : n(e.paid_now),
     cancelled: e.status === 'CANCELLED',
   };
   return { doc, logo: logoRow[0]?.data_url ?? '' };
@@ -322,6 +369,7 @@ export async function getInvoiceDoc(id: number): Promise<{ doc: BillDoc; logo: s
     sgst: n(inv.sgst),
     roundOff: n(inv.round_off),
     grand: n(inv.grand_total),
+    discount: n(inv.discount ?? 0),
     payments: pays.map((p) => ({ mode: p.mode as PaymentMode, amount: n(p.amount), referenceNo: String(p.reference_no ?? '') })),
     cancelled: inv.status === 'CANCELLED',
   };
