@@ -255,3 +255,5 @@ table.list.compact th, table.list.compact td { padding: 6px 8px; font-size: 0.9r
 .due-lines strong:last-child { color: var(--danger); }
 label.check { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; cursor: pointer; }
 label.check input { width: auto; }
+
+.hsn-rules input, .hsn-rules select { width: 100%; }

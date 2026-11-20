@@ -11,6 +11,7 @@ import { focusNextOnEnter } from '../lib/keys';
 import { askYesNo, showError } from '../lib/dialogs';
 import { Modal } from '../components/Modal';
 import type { CatalogueItem } from '../lib/catalogue';
+import { hsnFor } from '../lib/hsn';
 import { ItemsEditor, newKey, parseRows, useItemRows } from '../components/ItemsEditor';
 import type { BillDoc, Buyer, DailyRates, Relation, Settings } from '../lib/types';
 
@@ -58,7 +59,7 @@ export function NewBill({
 }) {
   const [buyer, setBuyer] = useState<Buyer>(() => emptyBuyer(settings));
   const [repeat, setRepeat] = useState(false);
-  const items = useItemRows(settings.hsn);
+  const items = useItemRows(settings.hsn, (d, m) => hsnFor(d, m, settings.hsnAuto, settings.hsn));
   const [mode, setMode] = useState<PaymentMode>('Cash');
   const [ref, setRef] = useState('');
   const [split, setSplit] = useState<SplitRow[] | null>(null);

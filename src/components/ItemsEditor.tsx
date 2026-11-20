@@ -7,6 +7,10 @@ import type { DailyRates } from '../lib/types';
 import { DescriptionInput } from './DescriptionInput';
 
 const HSN_SUGGESTIONS: [string, string][] = [
+  ['711319', 'Gold jewellery'],
+  ['711311', 'Silver jewellery (925 too)'],
+  ['711411', 'Silver articles (utensils, idols)'],
+  ['711419', 'Gold articles'],
   ['7113', 'Jewellery of gold / silver'],
   ['7114', "Goldsmiths' / silversmiths' wares (utensils, articles)"],
   ['7117', 'Imitation jewellery'],
@@ -25,6 +29,8 @@ export interface RowState {
   makingType: MakingType;
   making: string;
   hsn: string;
+  /** true once the HSN was typed by hand: auto-fill then leaves it alone */
+  hsnManual?: boolean;
   pricing: Pricing;
   /** catalogue code, e.g. RNG0005 */
   sku: string;
@@ -139,8 +145,9 @@ export function parseRows(rows: RowState[], rates: DailyRates | null, defaultHsn
 }
 
 /** Row state + add/remove, with focus moving to a newly added row. */
-export function useItemRows(defaultHsn: string) {
-  const [rows, setRows] = useState<RowState[]>(() => [newRow(defaultHsn)]);
+export function useItemRows(defaultHsn: string, autoHsn?: (description: string, metal: Metal) => string) {
+  const fresh = () => newRow(autoHsn ? autoHsn('', 'GOLD22') : defaultHsn);
+  const [rows, setRows] = useState<RowState[]>(() => [fresh()]);
   const [focusKey, setFocusKey] = useState<number | null>(null);
   useEffect(() => {
     if (focusKey == null) return;
@@ -149,14 +156,23 @@ export function useItemRows(defaultHsn: string) {
   }, [focusKey]);
   return {
     rows,
-    setRow: (key: number, patch: Partial<RowState>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r))),
+    setRow: (key: number, patch: Partial<RowState>) =>
+      setRows((rs) =>
+        rs.map((r) => {
+          if (r.key !== key) return r;
+          const n = { ...r, ...patch };
+          // the HSN follows the description and metal until it is typed by hand
+          if (autoHsn && !n.hsnManual && ('desc' in patch || 'metal' in patch || 'hsnManual' in patch)) n.hsn = autoHsn(n.desc, n.metal);
+          return n;
+        }),
+      ),
     addRow: () => {
-      const r = newRow(defaultHsn);
+      const r = fresh();
       setRows((rs) => [...rs, r]);
       setFocusKey(r.key);
     },
-    removeRow: (key: number) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow(defaultHsn)])),
-    reset: () => setRows([newRow(defaultHsn)]),
+    removeRow: (key: number) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [fresh()])),
+    reset: () => setRows([fresh()]),
   };
 }
 
@@ -234,7 +250,10 @@ export function ItemsEditor({
                       inputMode="numeric"
                       maxLength={8}
                       value={r.hsn}
-                      onChange={(e) => setRow(r.key, { hsn: e.target.value.replace(/[^0-9]/g, '') })}
+                      onChange={(e) => {
+                        const hsn = e.target.value.replace(/[^0-9]/g, '');
+                        setRow(r.key, { hsn, hsnManual: hsn !== '' });
+                      }}
                       placeholder={defaultHsn}
                     />
                   </label>

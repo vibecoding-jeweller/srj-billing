@@ -1,3 +1,4 @@
+import { DEFAULT_HSN_AUTO } from './hsn';
 import { calcBill, calcEstimate, isSilver, type ItemInput, type Metal, type PaymentMode } from './calc';
 import type { BillDoc, BillPayment, Buyer, EstimateCustomer, EstimateDoc, ExchangeLine, Settings, ShopSnapshot } from './types';
 
@@ -23,6 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   backupFolder: '',
   catalogueUrl: '',
   allowBackDatedBills: false,
+  hsnAuto: DEFAULT_HSN_AUTO,
   declaration:
     'We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.',
 };

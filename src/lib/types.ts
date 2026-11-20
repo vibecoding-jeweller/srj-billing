@@ -1,3 +1,4 @@
+import type { HsnAuto } from './hsn';
 import type { ItemCalc, MakingType, Metal, PaymentMode } from './calc';
 
 export type Relation = '' | 'S/o' | 'D/o' | 'W/o';
@@ -33,6 +34,8 @@ export interface Settings {
   catalogueUrl: string;
   /** Hidden: lets a GST bill be dated earlier in the current FY. Off unless turned on in Settings. */
   allowBackDatedBills?: boolean;
+  /** HSN auto-fill by metal and description (see lib/hsn.ts) */
+  hsnAuto?: HsnAuto;
 }
 
 /** Frozen copy of the shop details stored with each invoice. */

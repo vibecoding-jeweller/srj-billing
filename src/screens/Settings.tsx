@@ -3,6 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { getVersion } from '@tauri-apps/api/app';
 import { backupNow, catalogueLastSynced, countBillsInFy, lastSeqInFy } from '../lib/api';
 import { fmtSynced, type SyncResult } from '../lib/catalogue';
+import { DEFAULT_HSN_AUTO, HSN_RE, type HsnAuto, type HsnMetal, type HsnRule } from '../lib/hsn';
 import { financialYear, formatInvoiceNo, todayISO } from '../lib/fy';
 import { fmtPct, parseScaled } from '../lib/money';
 import { STATES, stateCode } from '../lib/states';
@@ -81,6 +82,10 @@ export function SettingsScreen({
   }, [fy]);
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS((x) => ({ ...x, [k]: v }));
+  const hsnAuto: HsnAuto = s.hsnAuto ?? DEFAULT_HSN_AUTO;
+  const setHsn = (patch: Partial<HsnAuto>) => set('hsnAuto', { ...hsnAuto, ...patch });
+  const setRule = (i: number, patch: Partial<HsnRule>) => setHsn({ rules: hsnAuto.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)) });
+  const digitsOnly = (v: string) => v.replace(/\D/g, '').slice(0, 8);
 
   const pickFolder = async (k: 'billsFolder' | 'backupFolder') => {
     const dir = await open({ directory: true, defaultPath: s[k] || undefined, title: k === 'billsFolder' ? 'Choose the Bills folder' : 'Choose the Backup folder (inside Google Drive)' });
@@ -106,6 +111,8 @@ export function SettingsScreen({
     const url = s.catalogueUrl.trim();
     if (url && !/^https:\/\/script\.google(usercontent)?\.com\//.test(url))
       return setMsg({ kind: 'error', text: '925 catalogue URL should be the Apps Script web app link (https://script.google.com/macros/s/…/exec).' });
+    const badHsn = [hsnAuto.gold, hsnAuto.silver, ...hsnAuto.rules.map((r) => r.hsn)].find((h) => !HSN_RE.test(h));
+    if (hsnAuto.enabled && badHsn !== undefined) return setMsg({ kind: 'error', text: 'Each HSN code must be 4 to 8 digits (check the HSN codes section).' });
     const next: Settings = {
       ...s,
       catalogueUrl: url,
@@ -258,11 +265,80 @@ export function SettingsScreen({
             <input className="num" inputMode="decimal" value={gst} onChange={(e) => setGst(e.target.value)} />
           </label>
           <label className="field">
-            Default HSN for new items
+            {hsnAuto.enabled ? 'HSN when nothing matches' : 'Default HSN for new items'}
             <input value={s.hsn} onChange={(e) => set('hsn', e.target.value)} />
           </label>
         </div>
         {billsThisFy !== 0 && <div className="hint" style={{ marginTop: 8 }}>The number is locked because bills already exist this financial year.</div>}
+      </section>
+
+      <section className="card">
+        <h3>HSN codes (filled in automatically)</h3>
+        <label className="check" style={{ marginBottom: 10 }}>
+          <input type="checkbox" checked={hsnAuto.enabled} onChange={(e) => setHsn({ enabled: e.target.checked })} /> Fill the HSN on each item from its metal and description
+          <span className="hint">— you can still type a different code on any item</span>
+        </label>
+        {hsnAuto.enabled && (
+          <div className="stack">
+            <div className="row">
+              <label className="field" style={{ width: 220 }}>
+                Gold jewellery (22K / 18K)
+                <input inputMode="numeric" value={hsnAuto.gold} onChange={(e) => setHsn({ gold: digitsOnly(e.target.value) })} />
+              </label>
+              <label className="field" style={{ width: 220 }}>
+                Silver jewellery (925 too)
+                <input inputMode="numeric" value={hsnAuto.silver} onChange={(e) => setHsn({ silver: digitsOnly(e.target.value) })} />
+              </label>
+            </div>
+            <div className="hint">Special items: if the description has one of these words (any close spelling), this code is used instead. Checked top to bottom.</div>
+            <table className="list compact hsn-rules">
+              <thead>
+                <tr>
+                  <th style={{ width: 200 }}>Name</th>
+                  <th>Words in the description</th>
+                  <th style={{ width: 110 }}>Metal</th>
+                  <th style={{ width: 110 }}>HSN</th>
+                  <th style={{ width: 30 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {hsnAuto.rules.map((r, i) => (
+                  <tr key={i}>
+                    <td>
+                      <input value={r.label} onChange={(e) => setRule(i, { label: e.target.value })} />
+                    </td>
+                    <td>
+                      <input value={r.words} onChange={(e) => setRule(i, { words: e.target.value })} placeholder="e.g. glass, katori, thali" />
+                    </td>
+                    <td>
+                      <select value={r.metal} onChange={(e) => setRule(i, { metal: e.target.value as HsnMetal })}>
+                        <option value="ANY">Any</option>
+                        <option value="GOLD">Gold</option>
+                        <option value="SILVER">Silver</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input inputMode="numeric" className={HSN_RE.test(r.hsn) ? '' : 'invalid'} value={r.hsn} onChange={(e) => setRule(i, { hsn: digitsOnly(e.target.value) })} />
+                    </td>
+                    <td>
+                      <button type="button" className="rm" title="Remove" onClick={() => setHsn({ rules: hsnAuto.rules.filter((_, j) => j !== i) })}>
+                        ×
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="row">
+              <button type="button" className="link" onClick={() => setHsn({ rules: [...hsnAuto.rules, { label: '', words: '', metal: 'ANY', hsn: '' }] })}>
+                + Add special item
+              </button>
+              <button type="button" className="link" style={{ marginLeft: 'auto' }} onClick={() => set('hsnAuto', DEFAULT_HSN_AUTO)}>
+                Reset to recommended codes
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="card">

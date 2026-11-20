@@ -1,6 +1,6 @@
 [package]
 name = "srj-billing"
-version = "0.4.0"
+version = "0.4.1"
 description = "Offline billing for jewellers"
 edition = "2021"
 
