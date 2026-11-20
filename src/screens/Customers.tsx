@@ -1,8 +1,9 @@
 // Customers (CRM): search, add and edit customers, see their bills and estimates,
 // and upcoming birthdays / anniversaries. Customers are also added automatically from bills and estimates.
 import { useEffect, useMemo, useState } from 'react';
-import { customerHistory, deleteCustomer, listCustomers, saveCustomer, type Customer, type CustomerRow, type RecordRow } from '../lib/api';
-import { MONTHS, upcomingOccasions } from '../lib/crm';
+import { customerHistory, deleteCustomer, listCustomers, saveCustomer, writeFile, type Customer, type CustomerRow, type RecordRow } from '../lib/api';
+import { customersCsv, MONTHS, upcomingOccasions } from '../lib/crm';
+import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { fmtBillDate, todayISO } from '../lib/fy';
 import { fmtMoney } from '../lib/money';
 import { STATES, stateCode } from '../lib/states';
@@ -133,6 +134,23 @@ export function Customers({ settings }: { settings: Settings }) {
     }
   };
 
+  const exportSheet = async () => {
+    try {
+      const everyone = await listCustomers('', 1_000_000);
+      if (!everyone.length) return setMsg({ kind: 'error', text: 'No customers yet.' });
+      const path = await saveDialog({
+        title: 'Save customer list for Excel',
+        defaultPath: `SRJ customers ${todayISO()}.csv`,
+        filters: [{ name: 'CSV (Excel)', extensions: ['csv'] }],
+      });
+      if (!path) return;
+      await writeFile(path, new TextEncoder().encode(customersCsv(everyone)));
+      setMsg({ kind: 'ok', text: `Saved ${everyone.length} customers to ${path}` });
+    } catch (e) {
+      setMsg({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
   const digits = (v: string) => v.replace(/\D/g, '').slice(0, 10);
   const totalPaid = history.filter((h) => h.status === 'ACTIVE').reduce((s, h) => s + h.grand_total, 0);
 
@@ -144,6 +162,9 @@ export function Customers({ settings }: { settings: Settings }) {
             Search customers
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Name, mobile, address or notes" />
           </label>
+          <button className="btn" onClick={exportSheet} title="Save every customer as a sheet that opens in Excel">
+            Download sheet
+          </button>
           <button className="btn primary" onClick={() => open(blank(settings))}>
             + New customer
           </button>

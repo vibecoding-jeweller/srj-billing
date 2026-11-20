@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { daysUntilAnnual, fmtDayMonth, upcomingOccasions } from './crm';
+import { customersCsv, CUSTOMER_SHEET_HEADER } from './crm';
 
 describe('birthdays and anniversaries', () => {
   it('shows day and month', () => {
@@ -29,5 +30,23 @@ describe('birthdays and anniversaries', () => {
       ['Lakhmichand', 'Anniversary', 0],
       ['Shruti', 'Birthday', 3],
     ]);
+  });
+});
+
+describe('customer sheet', () => {
+  const base = {
+    name: 'Shruti Mohan', relation: 'D/o', relativeName: 'Sanjay', mobile: '9027515504', otherMobile: '', address: 'Lal Kuan,\nBulandshahr',
+    state: 'Uttar Pradesh', pan: '', dob: '03-12', anniversary: '', notes: 'likes "payal"', bills: 2, estimates: 3, paid: 12345600,
+    lastVisit: '2026-11-05', createdAt: '2026-10-01 10:00:00',
+  };
+  it('writes an Excel-friendly CSV with every customer', () => {
+    const csv = customersCsv([base, { ...base, name: 'राम', mobile: '9000000001', otherMobile: '9000000002', paid: 0, lastVisit: null }]);
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    const lines = csv.slice(1).trimEnd().split('\r\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe(CUSTOMER_SHEET_HEADER.join(','));
+    expect(lines[1]).toBe('Shruti Mohan,D/o,Sanjay,"=""9027515504""",,"Lal Kuan, Bulandshahr",Uttar Pradesh,,12 March,,2,3,123456.00,2026-11-05,2026-10-01,"likes ""payal"""');
+    expect(lines[2]).toContain('राम');
+    expect(lines[2]).toContain(',0.00,,2026-10-01,');
   });
 });

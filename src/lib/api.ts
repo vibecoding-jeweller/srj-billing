@@ -441,7 +441,7 @@ const toCustomer = (r: Row): Customer => ({
 });
 
 /** Customers with their visit counts and totals (cancelled bills and estimates not counted). */
-export async function listCustomers(q: string): Promise<CustomerRow[]> {
+export async function listCustomers(q: string, limit = 1000): Promise<CustomerRow[]> {
   const like = `%${q.trim()}%`;
   const rows = await select<Row>(
     `SELECT c.*,
@@ -454,8 +454,8 @@ export async function listCustomers(q: string): Promise<CustomerRow[]> {
      FROM customers c
      WHERE ?1 = '%%' OR c.name LIKE ?1 OR c.mobile LIKE ?1 OR c.other_mobile LIKE ?1 OR c.address LIKE ?1 OR c.notes LIKE ?1
      ORDER BY COALESCE(last_visit, c.created_at) DESC, c.name
-     LIMIT 1000`,
-    [like],
+     LIMIT ?2`,
+    [like, Math.max(1, Math.floor(limit))],
   );
   return rows.map((r) => ({
     ...toCustomer(r),

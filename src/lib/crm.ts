@@ -45,3 +45,77 @@ export function upcomingOccasions(
   }
   return out.sort((a, b) => a.inDays - b.inDays || a.name.localeCompare(b.name));
 }
+
+// ---------- export ----------
+
+/** What the customer sheet needs from each customer (a CustomerRow fits). */
+export interface CustomerSheetRow {
+  name: string;
+  relation: string;
+  relativeName: string;
+  mobile: string;
+  otherMobile: string;
+  address: string;
+  state: string;
+  pan: string;
+  dob: string;
+  anniversary: string;
+  notes: string;
+  bills: number;
+  estimates: number;
+  /** paise */
+  paid: number;
+  lastVisit: string | null;
+  createdAt: string;
+}
+
+const csvCell = (v: string | number) => {
+  const s = String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+export const CUSTOMER_SHEET_HEADER = [
+  'Name',
+  'Relation',
+  'Relative name',
+  'Mobile',
+  'Other mobile',
+  'Address',
+  'State',
+  'PAN',
+  'Birthday',
+  'Anniversary',
+  'Bills',
+  'Estimates',
+  'Total purchases (Rs)',
+  'Last visit',
+  'Customer since',
+  'Notes',
+];
+
+/**
+ * All customers as a CSV that opens in Excel (UTF-8 with BOM so Hindi names show correctly).
+ * Mobiles are written as ="9876543210" so Excel keeps them as text; dates are YYYY-MM-DD.
+ */
+export function customersCsv(rows: CustomerSheetRow[]): string {
+  const phone = (m: string) => (m ? `="${m}"` : '');
+  const lines = [CUSTOMER_SHEET_HEADER, ...rows.map((c) => [
+    c.name,
+    c.relation,
+    c.relativeName,
+    phone(c.mobile),
+    phone(c.otherMobile),
+    c.address.split(/\r?\n/).map((l) => l.trim().replace(/,$/, '')).filter(Boolean).join(', '),
+    c.state,
+    c.pan,
+    fmtDayMonth(c.dob),
+    fmtDayMonth(c.anniversary),
+    c.bills,
+    c.estimates,
+    (c.paid / 100).toFixed(2),
+    c.lastVisit ?? '',
+    c.createdAt.slice(0, 10),
+    c.notes.replace(/\s*\r?\n\s*/g, ' / '),
+  ])];
+  return '\uFEFF' + lines.map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
